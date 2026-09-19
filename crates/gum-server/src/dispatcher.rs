@@ -318,7 +318,7 @@ mod tests {
     use alloy_primitives::{U256, address};
     use gum_core::{
         Amount, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, Currency, FactoryAddress,
-        InvoiceStatus, NetworkTerms, Party, PayerPolicy, TokenAddress,
+        InvoiceStatus, NetworkTerms, Party, PayerVerification, RecoveryAddress, TokenAddress,
     };
 
     use super::*;
@@ -340,10 +340,11 @@ mod tests {
         let mut snapshot = CanonicalIssuanceSnapshot::new(
             party("Acme", None),
             party("Globex", Some("payer@example.com")),
-            PayerPolicy::Permissionless,
+            PayerVerification::default(),
             Currency::Usdc,
             &networks,
             beneficiary,
+            RecoveryAddress(address!("0x9999999999999999999999999999999999999999")),
             amount,
             1_788_000_000,
         );
@@ -353,6 +354,7 @@ mod tests {
             Currency::Usdc,
             &networks,
             beneficiary,
+            RecoveryAddress(address!("0x9999999999999999999999999999999999999999")),
             amount,
             1_788_000_000,
             snapshot,

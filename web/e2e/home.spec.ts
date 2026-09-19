@@ -76,7 +76,7 @@ test("a request created through the API is shown read-only, with its issuer id v
     issuer_id: "acme-eu-2026",
     payer: { name: "Test Co" },
     heading: "API-created request",
-    payer_policy: { mode: "permissionless" },
+    verification: { email: { expected_email: "ap@acme.example" }, wallet_attestation: false },
   });
 
   // The table loaded before the request existed; a reload is what a merchant

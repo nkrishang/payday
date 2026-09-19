@@ -2,6 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -117,36 +118,55 @@ impl FromStr for InvoiceStatus {
     }
 }
 
-/// The payer's wallet, attested in their session on the network they chose,
-/// and everything derived from both: the recovery term, the salt, and the
-/// CREATE3 payment address. Immutable once set; the address commits to all
-/// of it.
+/// The payer's wallet, attested in their session on the network they chose —
+/// present only when the request attaches the wallet-attestation add-on — and
+/// everything the address commits to beyond the issuance document. The
+/// recovery term is never here: it is Gum's own recovery wallet, fixed in
+/// the issuance snapshot. Immutable once set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaymentBinding {
+pub struct WalletEvidence {
     pub payer_wallet: Address,
     pub attestation: PayerWalletAttestation,
-    /// The network the payer chose: one of the request's committed
-    /// networks, named by the attestation's EIP-712 domain.
+    /// RFC 3339, when the attestation was accepted.
+    pub bound_at: String,
+}
+
+/// One request, one chosen network, one address. The wallet evidence is
+/// `Some` exactly when the request attached wallet attestation and the payer
+/// completed it; a request without that add-on binds its network and derives
+/// its address with no payer signature at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentBinding {
+    /// The network the payer chose: one of the request's committed networks.
     pub network: NetworkTerms,
-    /// Always the payer's wallet: excess and late funds return to the payer.
+    /// Always the issuance snapshot's recovery term: Gum's recovery wallet.
     pub recovery: RecoveryAddress,
     pub salt: Salt,
     pub payment_address: PaymentAddress,
-    /// RFC 3339, when the attestation was accepted.
-    pub bound_at: String,
+    /// RFC 3339, when the address was registered.
+    pub ready_at: String,
+    /// The attested wallet and its statement, when wallet attestation is
+    /// attached.
+    pub wallet: Option<WalletEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invoice {
     pub id: InvoiceId,
     /// Every network the request may be paid on, in canonical order. The
-    /// payer picks one when they bind their wallet.
+    /// payer picks one when they bind their wallet, or — without the
+    /// wallet-attestation add-on — through the network-selection call.
     pub networks: Vec<NetworkTerms>,
     pub beneficiary: BeneficiaryAddress,
     pub expiration_timestamp: u64,
     pub amount: Amount,
-    /// `None` until a payer has attested a wallet on a network; only then
-    /// does the request have an address anyone can pay.
+    /// Fresh 32-byte value generated at issuance, kept undisclosed until the
+    /// address is registered: nobody can derive the address before the
+    /// service is watching for its funds.
+    pub issuance_nonce: B256,
+    /// `None` until the request has an address: after a wallet attestation
+    /// when that add-on is attached, otherwise at creation (pinned network)
+    /// or network selection.
     pub binding: Option<PaymentBinding>,
     pub status: InvoiceStatus,
     /// Finalized transfers credited toward `amount`, in base units.
@@ -177,18 +197,24 @@ pub enum BindError {
     UnsupportedChain(ChainId),
     #[error(transparent)]
     Attestation(#[from] PayerAttestationError),
+    /// The wallet step exists only for a request that attached the
+    /// wallet-attestation add-on; every other request binds without one.
+    #[error("this request does not attach wallet attestation")]
+    WalletAttestationNotAttached,
 }
 
 impl Invoice {
-    /// Issue an invoice: commit to `snapshot` and hash it. The typed
-    /// parameters are the ones an address will be derived from, so the
-    /// snapshot must describe exactly those; otherwise a proof would verify
-    /// against terms nobody was paid under. No address exists yet: see
-    /// [`Invoice::bind_payer_wallet`].
+    /// Issue an invoice: commit to `snapshot` and hash it, and draw the fresh
+    /// issuance nonce the salt will be derived from. The typed parameters are
+    /// the ones an address will be derived from, so the snapshot must
+    /// describe exactly those; otherwise a proof would verify against terms
+    /// nobody was paid under. No address exists yet: see
+    /// [`Invoice::bind_network`] and [`Invoice::bind_payer_wallet`].
     pub fn issue(
         currency: Currency,
         networks: &[NetworkTerms],
         beneficiary: BeneficiaryAddress,
+        recovery: RecoveryAddress,
         amount: Amount,
         expiration_timestamp: u64,
         snapshot: CanonicalIssuanceSnapshot,
@@ -196,10 +222,11 @@ impl Invoice {
         let expected = CanonicalIssuanceSnapshot::new(
             snapshot.issuer.clone(),
             snapshot.bill_to.clone(),
-            snapshot.payer_policy.clone(),
+            snapshot.payer_verification.clone(),
             currency,
             networks,
             beneficiary,
+            recovery,
             amount,
             expiration_timestamp,
         );
@@ -215,6 +242,10 @@ impl Invoice {
             (
                 "receiver_address",
                 snapshot.receiver_address == expected.receiver_address,
+            ),
+            (
+                "recovery_address",
+                snapshot.recovery_address == expected.recovery_address,
             ),
             (
                 "amount_base_units",
@@ -242,6 +273,7 @@ impl Invoice {
             beneficiary,
             expiration_timestamp,
             amount,
+            issuance_nonce: B256::from(rand::rng().random::<[u8; 32]>()),
             binding: None,
             status: InvoiceStatus::Created,
             received: Amount(U256::ZERO),
@@ -270,9 +302,25 @@ impl Invoice {
             .find(|network| network.chain_id == chain_id)
     }
 
-    /// The network the payer chose, once a wallet is bound.
+    /// The network the payer chose, once an address exists.
     pub fn network(&self) -> Option<&NetworkTerms> {
         self.binding.as_ref().map(|binding| &binding.network)
+    }
+
+    /// Whether the request attaches the wallet-attestation add-on.
+    pub fn wallet_attestation_required(&self) -> bool {
+        self.issuance_snapshot.payer_verification.wallet_attestation
+    }
+
+    /// The issuance snapshot's recovery term: always Gum's own recovery
+    /// wallet, never a payer's.
+    pub fn recovery(&self) -> RecoveryAddress {
+        RecoveryAddress(
+            self.issuance_snapshot
+                .recovery_address
+                .parse()
+                .expect("a stored snapshot's recovery address parses"),
+        )
     }
 
     /// What the payer's attestation must be for: the chosen network's chain
@@ -286,28 +334,22 @@ impl Invoice {
             })
     }
 
-    /// Derive the binding a verified attestation produces on `chain_id`: the
-    /// payer's wallet is the recovery term, the salt commits to the
-    /// attribution hash and the attestation digest, and the address follows
-    /// from both plus the chosen network's token, factory, and chain id. The
-    /// attestation is verified here under that network's domain; a binding
-    /// never exists for a signature that does not recover to its wallet or
-    /// that was made for another chain.
-    pub fn bind_payer_wallet(
+    /// The address-only binding a request without the wallet-attestation
+    /// add-on produces: the salt commits to the issuance nonce and the
+    /// document, nothing else. Any wallet may pay the address.
+    pub fn bind_network(
         &self,
         chain_id: ChainId,
-        attestation: PayerWalletAttestation,
-        bound_at: String,
+        ready_at: String,
     ) -> Result<PaymentBinding, BindError> {
+        if self.wallet_attestation_required() {
+            return Err(BindError::WalletAttestationNotAttached);
+        }
         let network = *self
             .network_for(chain_id)
             .ok_or(BindError::UnsupportedChain(chain_id))?;
-        let scope = self
-            .attestation_scope(chain_id)
-            .expect("network_for succeeded");
-        let verified = verify_payer_attestation(&attestation, scope)?;
-        let recovery = RecoveryAddress(verified.wallet);
-        let salt = recompute_salt(self.attribution_hash, verified.digest);
+        let recovery = self.recovery();
+        let salt = recompute_salt(self.issuance_nonce, self.attribution_hash, None);
         let payment_address = predict_payment_address(
             network.factory,
             network.token,
@@ -319,13 +361,67 @@ impl Invoice {
             network.chain_id,
         );
         Ok(PaymentBinding {
-            payer_wallet: verified.wallet,
-            attestation,
             network,
             recovery,
             salt,
             payment_address,
-            bound_at,
+            ready_at,
+            wallet: None,
+        })
+    }
+
+    /// Derive the binding a verified attestation produces on `chain_id`: the
+    /// salt commits to the issuance nonce, the attribution hash, and the
+    /// attestation digest, and the address follows from both plus the chosen
+    /// network's token, factory, and chain id. The recovery term stays the
+    /// snapshot's — Gum's recovery wallet — whatever wallet the payer
+    /// attests. The attestation is verified here under that network's domain;
+    /// a binding never exists for a signature that does not recover to its
+    /// wallet or that was made for another chain. Only a request that
+    /// attached the wallet-attestation add-on can bind this way.
+    pub fn bind_payer_wallet(
+        &self,
+        chain_id: ChainId,
+        attestation: PayerWalletAttestation,
+        bound_at: String,
+    ) -> Result<PaymentBinding, BindError> {
+        if !self.wallet_attestation_required() {
+            return Err(BindError::WalletAttestationNotAttached);
+        }
+        let network = *self
+            .network_for(chain_id)
+            .ok_or(BindError::UnsupportedChain(chain_id))?;
+        let scope = self
+            .attestation_scope(chain_id)
+            .expect("network_for succeeded");
+        let verified = verify_payer_attestation(&attestation, scope)?;
+        let recovery = self.recovery();
+        let salt = recompute_salt(
+            self.issuance_nonce,
+            self.attribution_hash,
+            Some(verified.digest),
+        );
+        let payment_address = predict_payment_address(
+            network.factory,
+            network.token,
+            self.amount,
+            self.beneficiary,
+            self.expiration_timestamp,
+            recovery,
+            salt,
+            network.chain_id,
+        );
+        Ok(PaymentBinding {
+            network,
+            recovery,
+            salt,
+            payment_address,
+            ready_at: bound_at.clone(),
+            wallet: Some(WalletEvidence {
+                payer_wallet: verified.wallet,
+                attestation,
+                bound_at,
+            }),
         })
     }
 
@@ -409,8 +505,8 @@ mod tests {
     }
 
     use crate::{
-        Amount, BeneficiaryAddress, ChainId, FactoryAddress, Party, PayerAttestation, PayerPolicy,
-        RecoveryAddress, TokenAddress, predict_payment_address, recompute_salt,
+        Amount, BeneficiaryAddress, ChainId, FactoryAddress, Party, PayerAttestation,
+        PayerVerification, RecoveryAddress, TokenAddress, predict_payment_address, recompute_salt,
         sign_payer_attestation, wallet_of,
     };
     use alloy_primitives::{U256, address};
@@ -418,6 +514,8 @@ mod tests {
     const PAYER_KEY: [u8; 32] = [7u8; 32];
     const MONAD: ChainId = ChainId(143);
     const BASE: ChainId = ChainId(8453);
+    /// The snapshot's recovery term: Gum's own recovery wallet in tests.
+    const RECOVERY: Address = address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc");
 
     fn party(name: &str) -> Party {
         Party {
@@ -442,8 +540,9 @@ mod tests {
         ]
     }
 
-    /// Issue with a minimal permissionless snapshot built from the same terms.
-    fn issue(
+    /// Issue with a minimal snapshot built from the same terms.
+    fn issue_with(
+        verification: PayerVerification,
         networks: &[NetworkTerms],
         beneficiary: BeneficiaryAddress,
         amount: Amount,
@@ -452,10 +551,11 @@ mod tests {
         let snapshot = CanonicalIssuanceSnapshot::new(
             party("Acme"),
             party("Globex"),
-            PayerPolicy::Permissionless,
+            verification,
             Currency::Usdc,
             networks,
             beneficiary,
+            RecoveryAddress(RECOVERY),
             amount,
             expiration_timestamp,
         );
@@ -463,6 +563,7 @@ mod tests {
             Currency::Usdc,
             networks,
             beneficiary,
+            RecoveryAddress(RECOVERY),
             amount,
             expiration_timestamp,
             snapshot,
@@ -470,8 +571,36 @@ mod tests {
         .unwrap()
     }
 
+    fn issue(
+        networks: &[NetworkTerms],
+        beneficiary: BeneficiaryAddress,
+        amount: Amount,
+        expiration_timestamp: u64,
+    ) -> Invoice {
+        issue_with(
+            PayerVerification::default(),
+            networks,
+            beneficiary,
+            amount,
+            expiration_timestamp,
+        )
+    }
+
     fn sample_invoice() -> Invoice {
         issue(
+            &networks(),
+            BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
+            Amount(U256::from(100)),
+            1_900_000_000,
+        )
+    }
+
+    fn attesting_invoice() -> Invoice {
+        issue_with(
+            PayerVerification {
+                wallet_attestation: true,
+                ..PayerVerification::default()
+            },
             &networks(),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc7C01")),
             Amount(U256::from(100)),
@@ -498,7 +627,7 @@ mod tests {
     }
 
     fn bound_invoice() -> Invoice {
-        let mut invoice = sample_invoice();
+        let mut invoice = attesting_invoice();
         let binding = invoice
             .bind_payer_wallet(
                 MONAD,
@@ -579,22 +708,81 @@ mod tests {
         assert_eq!(invoice.beneficiary, beneficiary);
         assert_eq!(invoice.amount, amount);
         assert_eq!(invoice.expiration_timestamp, expiration_timestamp);
+        assert_eq!(invoice.recovery(), RecoveryAddress(RECOVERY));
     }
 
     #[test]
-    fn binding_derives_recovery_salt_and_address_from_the_attestation_on_the_chosen_chain() {
+    fn a_request_without_wallet_attestation_binds_its_network_without_a_signature() {
+        let invoice = sample_invoice();
+        let binding = invoice
+            .bind_network(MONAD, "2026-09-06T00:00:00Z".into())
+            .unwrap();
+        assert_eq!(binding.network, networks()[0]);
+        assert_eq!(binding.recovery, RecoveryAddress(RECOVERY));
+        assert_eq!(binding.wallet, None);
+        assert_eq!(
+            binding.salt,
+            recompute_salt(invoice.issuance_nonce, invoice.attribution_hash, None)
+        );
+        let expected = predict_payment_address(
+            binding.network.factory,
+            binding.network.token,
+            invoice.amount,
+            invoice.beneficiary,
+            invoice.expiration_timestamp,
+            binding.recovery,
+            binding.salt,
+            MONAD,
+        );
+        assert_eq!(binding.payment_address, expected);
+        // A chain the request does not offer is refused.
+        assert_eq!(
+            invoice.bind_network(ChainId(1), String::new()).unwrap_err(),
+            BindError::UnsupportedChain(ChainId(1))
+        );
+    }
+
+    #[test]
+    fn the_wallet_step_belongs_only_to_requests_that_attach_it() {
+        let invoice = sample_invoice();
+        assert_eq!(
+            invoice
+                .bind_payer_wallet(
+                    MONAD,
+                    attest(&invoice, MONAD, &PAYER_KEY, 0x11),
+                    String::new()
+                )
+                .unwrap_err(),
+            BindError::WalletAttestationNotAttached
+        );
+        let attesting = attesting_invoice();
+        assert_eq!(
+            attesting.bind_network(MONAD, String::new()).unwrap_err(),
+            BindError::WalletAttestationNotAttached
+        );
+    }
+
+    #[test]
+    fn binding_derives_salt_and_address_from_the_attestation_on_the_chosen_chain() {
         // The integration test that ties derive_attribution, the payer
         // attestation, recompute_salt, and predict_payment_address together.
         let invoice = bound_invoice();
         let binding = invoice.binding.as_ref().unwrap();
-        assert_eq!(binding.payer_wallet, wallet_of(&PAYER_KEY));
-        assert_eq!(binding.recovery, RecoveryAddress(wallet_of(&PAYER_KEY)));
+        let wallet = binding.wallet.as_ref().unwrap();
+        assert_eq!(wallet.payer_wallet, wallet_of(&PAYER_KEY));
+        // The recovery term is the snapshot's, never the payer's wallet.
+        assert_eq!(binding.recovery, RecoveryAddress(RECOVERY));
+        assert_ne!(RecoveryAddress(wallet.payer_wallet), binding.recovery);
         assert_eq!(binding.network, networks()[0]);
         assert_eq!(invoice.network(), Some(&networks()[0]));
-        let digest: B256 = binding.attestation.digest.parse().unwrap();
+        let digest: B256 = wallet.attestation.digest.parse().unwrap();
         assert_eq!(
             binding.salt,
-            recompute_salt(invoice.attribution_hash, digest)
+            recompute_salt(
+                invoice.issuance_nonce,
+                invoice.attribution_hash,
+                Some(digest)
+            )
         );
         let expected = predict_payment_address(
             binding.network.factory,
@@ -613,7 +801,7 @@ mod tests {
 
     #[test]
     fn the_chain_the_payer_chooses_is_committed_by_the_attestation_domain() {
-        let invoice = sample_invoice();
+        let invoice = attesting_invoice();
         let on_monad = invoice
             .bind_payer_wallet(
                 MONAD,
@@ -662,16 +850,21 @@ mod tests {
 
     #[test]
     fn binding_refuses_an_attestation_for_another_request_or_wallet() {
-        let invoice = sample_invoice();
-        let other = sample_invoice();
+        let invoice = attesting_invoice();
+        let other = attesting_invoice();
         assert_eq!(invoice.attribution_hash, other.attribution_hash);
-        let mut foreign = issue(
+        // The nonce is what makes the otherwise identical requests distinct.
+        assert_ne!(invoice.issuance_nonce, other.issuance_nonce);
+        let foreign = issue_with(
+            PayerVerification {
+                wallet_attestation: true,
+                ..PayerVerification::default()
+            },
             &networks(),
             invoice.beneficiary,
             Amount(U256::from(101)),
             invoice.expiration_timestamp,
         );
-        foreign.binding = None;
         assert_eq!(
             invoice
                 .bind_payer_wallet(
@@ -704,11 +897,8 @@ mod tests {
     }
 
     #[test]
-    fn same_request_and_wallet_with_different_nonces_get_different_addresses() {
-        // Identical terms hash identically; the session nonce inside the
-        // attestation is what keeps their addresses apart, and a payer who
-        // signs twice for the same request produces two distinct salts.
-        let invoice = sample_invoice();
+    fn the_attested_wallet_changes_salt_and_address_but_not_recovery() {
+        let invoice = attesting_invoice();
         let a = invoice
             .bind_payer_wallet(
                 MONAD,
@@ -716,20 +906,6 @@ mod tests {
                 String::new(),
             )
             .unwrap();
-        let b = invoice
-            .bind_payer_wallet(
-                MONAD,
-                attest(&invoice, MONAD, &PAYER_KEY, 0x12),
-                String::new(),
-            )
-            .unwrap();
-        assert_ne!(a.salt, b.salt, "salts must differ");
-        assert_ne!(
-            a.payment_address, b.payment_address,
-            "addresses must differ"
-        );
-        // A different wallet moves both the salt (through the digest) and
-        // the recovery term.
         let c = invoice
             .bind_payer_wallet(
                 MONAD,
@@ -738,7 +914,9 @@ mod tests {
             )
             .unwrap();
         assert_ne!(a.salt, c.salt);
-        assert_ne!(a.recovery, c.recovery);
+        // Whatever wallet attests, funds recover to Gum's wallet.
+        assert_eq!(a.recovery, c.recovery);
+        assert_eq!(a.recovery, RecoveryAddress(RECOVERY));
         assert_ne!(a.payment_address, c.payment_address);
     }
 
@@ -788,6 +966,10 @@ mod tests {
             invoice.issuance_snapshot.receiver_address,
             invoice.beneficiary.0.to_checksum(None)
         );
+        assert_eq!(
+            invoice.issuance_snapshot.recovery_address,
+            RECOVERY.to_checksum(None)
+        );
     }
 
     #[test]
@@ -799,10 +981,11 @@ mod tests {
             CanonicalIssuanceSnapshot::new(
                 party("Acme"),
                 party("Globex"),
-                PayerPolicy::Permissionless,
+                PayerVerification::default(),
                 Currency::Usdc,
                 &networks(),
                 beneficiary,
+                RecoveryAddress(RECOVERY),
                 amount,
                 1_900_000_000,
             )
@@ -821,6 +1004,11 @@ mod tests {
             ("receiver_address", {
                 let mut s = snapshot();
                 s.receiver_address = s.networks[0].factory_address.clone();
+                s
+            }),
+            ("recovery_address", {
+                let mut s = snapshot();
+                s.recovery_address = s.networks[0].factory_address.clone();
                 s
             }),
             ("networks", {
@@ -844,6 +1032,7 @@ mod tests {
                 Currency::Usdc,
                 &networks(),
                 beneficiary,
+                RecoveryAddress(RECOVERY),
                 amount,
                 1_900_000_000,
                 snapshot,
@@ -858,10 +1047,11 @@ mod tests {
         let empty = CanonicalIssuanceSnapshot::new(
             party("Acme"),
             party("Globex"),
-            PayerPolicy::Permissionless,
+            PayerVerification::default(),
             Currency::Usdc,
             &[],
             beneficiary,
+            RecoveryAddress(RECOVERY),
             amount,
             1_900_000_000,
         );
@@ -870,6 +1060,7 @@ mod tests {
                 Currency::Usdc,
                 &[],
                 beneficiary,
+                RecoveryAddress(RECOVERY),
                 amount,
                 1_900_000_000,
                 empty

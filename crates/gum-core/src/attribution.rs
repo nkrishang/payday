@@ -3,39 +3,37 @@
 //!
 //! ```text
 //! canonical_bytes    = JCS(canonical_issuance_snapshot)          (RFC 8785)
-//! attribution_hash   = keccak256("GUM_ATTRIBUTION_V4" || canonical_bytes)
-//! attestation_digest = EIP-712 signing hash of the payer's PayerAttestation
-//! salt               = keccak256("GUM_SALT_V3" || attribution_hash || attestation_digest)
+//! attribution_hash   = keccak256("GUM_ATTRIBUTION_V5" || canonical_bytes)
+//! salt               = keccak256("GUM_SALT_V5" || issuance_nonce || attribution_hash [+ attestation_digest])
 //! ```
 //!
-//! The salt exists only once a payer has attested a wallet for the request
-//! (see [`crate::PayerAttestation`]). The attestation carries a one-time
-//! nonce issued to the payer's session, so identical requests land at
-//! distinct addresses and nobody can enumerate addresses from guessable
-//! request contents. The API never accepts a client-supplied salt:
-//! [`recompute_salt`] over a verified attestation is the only way one comes
-//! into existence.
-
-use std::fmt;
-use std::str::FromStr;
+//! The salt exists from the moment the payment address does. The issuance
+//! nonce is a fresh 32-byte value generated at creation and kept undisclosed
+//! until the address is registered, so nobody can derive and prefund an
+//! address the service is not watching yet. When the request attaches wallet
+//! attestation, the salt also commits to the EIP-712 digest of the payer's
+//! attestation (see [`crate::PayerAttestation`]). The API never accepts a
+//! client-supplied salt or nonce: [`recompute_salt`] over the stored nonce —
+//! plus a verified attestation, when one is required — is the only way one
+//! comes into existence.
 
 use alloy_primitives::{B256, keccak256};
-use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{Amount, BeneficiaryAddress, Currency, NetworkTerms, Salt};
+use crate::{Amount, BeneficiaryAddress, Currency, NetworkTerms, RecoveryAddress, Salt};
 
-pub const ATTRIBUTION_VERSION: u16 = 4;
-pub const ATTRIBUTION_DOMAIN: &[u8] = b"GUM_ATTRIBUTION_V4";
-pub const SALT_DOMAIN: &[u8] = b"GUM_SALT_V3";
+pub const ATTRIBUTION_VERSION: u16 = 5;
+pub const ATTRIBUTION_DOMAIN: &[u8] = b"GUM_ATTRIBUTION_V5";
+pub const SALT_DOMAIN: &[u8] = b"GUM_SALT_V5";
 /// `CanonicalIssuanceSnapshot::schema`; a new schema means a new version.
 /// v3 commits to the list of networks the request may be paid on instead of
 /// one chain: the payer's attestation selects one of them. v4 names the
-/// currency and its decimals, so a document states what it asks for in its
-/// own words rather than only through each network's contract address.
-pub const SNAPSHOT_SCHEMA: &str = "gum.invoice.v4";
+/// currency and its decimals. v5 replaces the exclusive `payer_policy` with
+/// independent verification add-ons and commits to the payment contract's
+/// recovery term, which is always Gum's own recovery wallet.
+pub const SNAPSHOT_SCHEMA: &str = "gum.invoice.v5";
 /// `CanonicalIssuanceSnapshot::canonicalization`: RFC 8785 JSON Canonicalization Scheme.
 pub const CANONICALIZATION: &str = "RFC8785";
 /// One side of an invoice: bounded free text rendered verbatim, never parsed.
@@ -49,116 +47,71 @@ pub struct Party {
     pub details: Option<String>,
 }
 
-/// The three public payer modes (product plan §3.2). Deserialization enforces
-/// the mode rules of §4.5 (each assertion is required exactly where its mode
-/// needs it and forbidden elsewhere), so an unrepresentable policy can never
-/// reach validation.
+/// The three verification add-ons a deposit request can attach, independently
+/// of one another. The default is none of them: a fully permissionless
+/// request whose address exists as soon as its network is known and whose
+/// deposits are welcome from any wallet.
 ///
-/// `merchant_session` is the API-first mode: the merchant's own application
-/// has already authenticated the payer, names them by `payer_reference` (its
-/// own user id), and opens the hosted checkout for them with a single-use
-/// client secret. Gum performs no check of its own; it records that the
-/// merchant's server released the secret and binds the session to it.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum PayerPolicy {
-    Permissionless,
-    VerifiedEmail { expected_email: String },
-    MerchantSession { payer_reference: String },
-}
-
-/// The wire shape of every mode. A derived internally tagged enum would let a
-/// unit variant swallow extra fields, so the mode rules are applied by hand.
-#[derive(Deserialize)]
+/// `email` asks the payer to prove ownership of an expected mailbox; it is
+/// the old `verified_email` mode. `merchant_auth` is the old
+/// `merchant_session` mode: the merchant's own application has already
+/// authenticated the payer, names them by `payer_reference` (its own user
+/// id), and opens the hosted checkout for them with a single-use client
+/// secret; Gum performs no check of its own. `wallet_attestation` asks the
+/// payer to sign an EIP-712 attestation from the wallet they will pay from;
+/// without it, deposits from any wallet are good.
+///
+/// The recovery term is deliberately absent: it is always Gum's own
+/// recovery wallet, snapshotted into the issuance document, and never a
+/// request field.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct PayerPolicyWire {
-    mode: PayerPolicyMode,
+pub struct PayerVerification {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<EmailVerification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merchant_auth: Option<MerchantAuth>,
+    /// Serialized even when false, so the canonical form is stable.
     #[serde(default)]
-    expected_email: Option<String>,
-    #[serde(default)]
-    payer_reference: Option<String>,
+    pub wallet_attestation: bool,
 }
 
-impl<'de> Deserialize<'de> for PayerPolicy {
+/// Prove ownership of exactly this mailbox with a one-time code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EmailVerification {
+    pub expected_email: String,
+}
+
+/// The merchant's own authentication: its application signed the payer in,
+/// names them by `payer_reference`, and released the single-use client
+/// secret that opens the checkout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MerchantAuth {
+    pub payer_reference: String,
+}
+
+impl<'de> Deserialize<'de> for PayerVerification {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let wire = PayerPolicyWire::deserialize(deserializer)?;
-        let mode = wire.mode;
-        if wire.expected_email.is_some() && mode != PayerPolicyMode::VerifiedEmail {
-            return Err(D::Error::custom(format!(
-                "expected_email is not allowed for {mode}"
-            )));
+        /// The wire shape, so the defaults above apply only at the field
+        /// level and unknown fields are still refused.
+        #[derive(Deserialize, Default)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(default)]
+            email: Option<EmailVerification>,
+            #[serde(default)]
+            merchant_auth: Option<MerchantAuth>,
+            #[serde(default)]
+            wallet_attestation: bool,
         }
-        if wire.payer_reference.is_some() && mode != PayerPolicyMode::MerchantSession {
-            return Err(D::Error::custom(format!(
-                "payer_reference is not allowed for {mode}"
-            )));
-        }
-        match mode {
-            PayerPolicyMode::Permissionless => Ok(PayerPolicy::Permissionless),
-            PayerPolicyMode::VerifiedEmail => wire
-                .expected_email
-                .map(|expected_email| PayerPolicy::VerifiedEmail { expected_email })
-                .ok_or_else(|| D::Error::custom("expected_email is required for verified_email")),
-            PayerPolicyMode::MerchantSession => wire
-                .payer_reference
-                .map(|payer_reference| PayerPolicy::MerchantSession { payer_reference })
-                .ok_or_else(|| {
-                    D::Error::custom("payer_reference is required for merchant_session")
-                }),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PayerPolicyMode {
-    Permissionless,
-    VerifiedEmail,
-    MerchantSession,
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error("unknown payer policy mode: {0}")]
-pub struct PayerPolicyModeParseError(pub String);
-
-impl PayerPolicyMode {
-    pub const ALL: [PayerPolicyMode; 3] = [
-        PayerPolicyMode::Permissionless,
-        PayerPolicyMode::VerifiedEmail,
-        PayerPolicyMode::MerchantSession,
-    ];
-
-    /// The canonical string used on the wire and in `invoices.payer_policy_mode`.
-    /// This is the single source of truth; the DB CHECK constraint agrees with it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PayerPolicyMode::Permissionless => "permissionless",
-            PayerPolicyMode::VerifiedEmail => "verified_email",
-            PayerPolicyMode::MerchantSession => "merchant_session",
-        }
-    }
-
-    /// Whether invoice content and payment mechanics are withheld from the
-    /// payer until verification completes (product plan §4.3).
-    pub fn is_gated(self) -> bool {
-        self != PayerPolicyMode::Permissionless
-    }
-}
-
-impl fmt::Display for PayerPolicyMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for PayerPolicyMode {
-    type Err = PayerPolicyModeParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        PayerPolicyMode::ALL
-            .into_iter()
-            .find(|mode| mode.as_str() == s)
-            .ok_or_else(|| PayerPolicyModeParseError(s.to_string()))
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            email: wire.email,
+            merchant_auth: wire.merchant_auth,
+            wallet_attestation: wire.wallet_attestation,
+        })
     }
 }
 
@@ -175,7 +128,6 @@ pub enum PayerPolicyError {
     )]
     InvalidPayerReference,
 }
-
 /// The email syntax rule shared with merchant sign-in: bounded, no whitespace,
 /// one `@`, and a dotted domain. Anything stricter would reject real mailboxes.
 pub fn valid_email(value: &str) -> bool {
@@ -200,29 +152,48 @@ pub fn valid_payer_reference(value: &str) -> bool {
             .any(|character| character.is_whitespace() || character.is_control())
 }
 
-impl PayerPolicy {
-    pub fn mode(&self) -> PayerPolicyMode {
-        match self {
-            PayerPolicy::Permissionless => PayerPolicyMode::Permissionless,
-            PayerPolicy::VerifiedEmail { .. } => PayerPolicyMode::VerifiedEmail,
-            PayerPolicy::MerchantSession { .. } => PayerPolicyMode::MerchantSession,
-        }
+impl PayerVerification {
+    /// Whether invoice content and payment mechanics are withheld from the
+    /// payer until identity verification completes: any attached identity
+    /// add-on gates the content, whether or not wallet attestation is
+    /// attached.
+    pub fn is_gated(&self) -> bool {
+        self.email.is_some() || self.merchant_auth.is_some()
     }
 
     pub fn expected_email(&self) -> Option<&str> {
-        match self {
-            PayerPolicy::VerifiedEmail { expected_email } => Some(expected_email),
-            PayerPolicy::Permissionless | PayerPolicy::MerchantSession { .. } => None,
-        }
+        self.email
+            .as_ref()
+            .map(|email| email.expected_email.as_str())
     }
 
     /// The merchant's own identifier for the authenticated payer, in the
-    /// merchant-session mode only.
+    /// merchant-auth add-on only.
     pub fn payer_reference(&self) -> Option<&str> {
-        match self {
-            PayerPolicy::MerchantSession { payer_reference } => Some(payer_reference),
-            PayerPolicy::Permissionless | PayerPolicy::VerifiedEmail { .. } => None,
+        self.merchant_auth
+            .as_ref()
+            .map(|auth| auth.payer_reference.as_str())
+    }
+
+    /// The add-ons attached, by name: the summary form used in list
+    /// responses and webhook payloads.
+    pub fn addons(&self) -> Vec<&'static str> {
+        let mut addons = Vec::new();
+        if self.email.is_some() {
+            addons.push("email");
         }
+        if self.merchant_auth.is_some() {
+            addons.push("merchant_auth");
+        }
+        if self.wallet_attestation {
+            addons.push("wallet_attestation");
+        }
+        addons
+    }
+
+    /// True when no add-on is attached: the permissionless default.
+    pub fn is_default(&self) -> bool {
+        self.addons().is_empty()
     }
 
     pub fn validate(&self) -> Result<(), PayerPolicyError> {
@@ -245,14 +216,14 @@ impl PayerPolicy {
     /// lowercased so a retry that only differs in case is the same request,
     /// and the payer reference trimmed but otherwise as the merchant wrote it.
     pub fn normalized(&self) -> Self {
-        match self {
-            PayerPolicy::Permissionless => PayerPolicy::Permissionless,
-            PayerPolicy::VerifiedEmail { expected_email } => PayerPolicy::VerifiedEmail {
-                expected_email: expected_email.trim().to_lowercase(),
-            },
-            PayerPolicy::MerchantSession { payer_reference } => PayerPolicy::MerchantSession {
-                payer_reference: payer_reference.trim().to_owned(),
-            },
+        Self {
+            email: self.email.as_ref().map(|email| EmailVerification {
+                expected_email: email.expected_email.trim().to_lowercase(),
+            }),
+            merchant_auth: self.merchant_auth.as_ref().map(|auth| MerchantAuth {
+                payer_reference: auth.payer_reference.trim().to_owned(),
+            }),
+            wallet_attestation: self.wallet_attestation,
         }
     }
 }
@@ -303,12 +274,12 @@ impl SnapshotNetwork {
 /// Everything an issued invoice commits to. Numbers are decimal strings and
 /// addresses are EIP-55 checksummed so the canonical form is unambiguous.
 ///
-/// The recovery address is deliberately absent: it is the payer's attested
-/// wallet, known only after issuance, and it enters the payment address
-/// through the attestation the salt is derived from rather than through
-/// this document. So is the chain: the request commits to every network it
-/// may be paid on, and the attestation's EIP-712 domain names the one the
-/// payer chose.
+/// The recovery address is always Gum's own recovery wallet: it is fixed
+/// at issuance and committed here, never derived from a payer wallet. So is
+/// the chain, when it is not pinned: the request commits to every network it
+/// may be paid on, and the payer picks one — through a wallet attestation's
+/// EIP-712 domain when wallet attestation is attached, or through the
+/// payer's network-selection call when it is not.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalIssuanceSnapshot {
@@ -327,10 +298,14 @@ pub struct CanonicalIssuanceSnapshot {
     pub heading: Option<String>,
     pub reference: Option<String>,
     pub expiration_timestamp: String,
-    pub payer_policy: PayerPolicy,
+    pub payer_verification: PayerVerification,
     pub attachment: Option<AttachmentCommitment>,
     pub networks: Vec<SnapshotNetwork>,
     pub receiver_address: String,
+    /// EIP-55 checksummed: Gum's recovery wallet, the payment contract's
+    /// recovery term. Overpayments, expired balances, and late transfers go
+    /// here, and Gum returns them to the payer manually.
+    pub recovery_address: String,
 }
 
 impl CanonicalIssuanceSnapshot {
@@ -343,10 +318,11 @@ impl CanonicalIssuanceSnapshot {
     pub fn new(
         issuer: Party,
         bill_to: Party,
-        payer_policy: PayerPolicy,
+        payer_verification: PayerVerification,
         currency: Currency,
         networks: &[NetworkTerms],
         receiver: BeneficiaryAddress,
+        recovery: RecoveryAddress,
         amount: Amount,
         expiration_timestamp: u64,
     ) -> Self {
@@ -364,10 +340,11 @@ impl CanonicalIssuanceSnapshot {
             heading: None,
             reference: None,
             expiration_timestamp: expiration_timestamp.to_string(),
-            payer_policy,
+            payer_verification,
             attachment: None,
             networks: sorted.into_iter().map(SnapshotNetwork::from).collect(),
             receiver_address: receiver.0.to_checksum(None),
+            recovery_address: recovery.0.to_checksum(None),
         }
     }
 
@@ -409,20 +386,29 @@ pub fn attribution_hash(canonical_bytes: &[u8]) -> B256 {
     keccak256([ATTRIBUTION_DOMAIN, canonical_bytes].concat())
 }
 
-/// `keccak256(SALT_DOMAIN || attribution_hash || attestation_digest)`: what a
-/// verifier recomputes from a proof, and what binding stores as the salt.
-/// `attestation_digest` is the EIP-712 signing hash of the payer's verified
-/// wallet attestation, so the address commits to the request text and to the
+/// `keccak256(SALT_DOMAIN || issuance_nonce || attribution_hash)` when the
+/// request attaches no wallet attestation, and
+/// `keccak256(SALT_DOMAIN || issuance_nonce || attribution_hash ||
+/// attestation_digest)` when it does: what a verifier recomputes from a
+/// proof, and what binding stores as the salt. The issuance nonce is the
+/// fresh 32-byte value generated at creation, so identical requests land at
+/// distinct addresses and nobody can derive an address before the service
+/// registers it. `attestation_digest` is the EIP-712 signing hash of the
+/// payer's verified wallet attestation, so the address also commits to the
 /// exact statement the payer signed.
-pub fn recompute_salt(attribution_hash: B256, attestation_digest: B256) -> Salt {
-    Salt(keccak256(
-        [
-            SALT_DOMAIN,
-            attribution_hash.as_slice(),
-            attestation_digest.as_slice(),
-        ]
-        .concat(),
-    ))
+pub fn recompute_salt(
+    issuance_nonce: B256,
+    attribution_hash: B256,
+    attestation_digest: Option<B256>,
+) -> Salt {
+    let mut input = Vec::with_capacity(4 * 32 + SALT_DOMAIN.len());
+    input.extend_from_slice(SALT_DOMAIN);
+    input.extend_from_slice(issuance_nonce.as_slice());
+    input.extend_from_slice(attribution_hash.as_slice());
+    if let Some(digest) = attestation_digest {
+        input.extend_from_slice(digest.as_slice());
+    }
+    Salt(keccak256(input))
 }
 
 /// Canonicalize and hash a snapshot.
@@ -445,6 +431,7 @@ mod tests {
     use crate::{ChainId, FactoryAddress, RecoveryAddress, TokenAddress, predict_payment_address};
 
     const WALLET: Address = address!("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc");
+    const NONCE: B256 = B256::repeat_byte(0x22);
 
     fn networks() -> Vec<NetworkTerms> {
         vec![
@@ -469,7 +456,7 @@ mod tests {
         }
     }
 
-    fn snapshot() -> CanonicalIssuanceSnapshot {
+    pub(crate) fn snapshot() -> CanonicalIssuanceSnapshot {
         let mut snapshot = CanonicalIssuanceSnapshot::new(
             Party {
                 name: "Acme Corp".into(),
@@ -481,12 +468,17 @@ mod tests {
                 email: None,
                 details: Some("1 Main St".into()),
             },
-            PayerPolicy::VerifiedEmail {
-                expected_email: "alice@example.com".into(),
+            PayerVerification {
+                email: Some(EmailVerification {
+                    expected_email: "alice@example.com".into(),
+                }),
+                merchant_auth: None,
+                wallet_attestation: false,
             },
             Currency::Usdc,
             &networks(),
             BeneficiaryAddress(address!("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")),
+            RecoveryAddress(WALLET),
             Amount(U256::from(1_000_000)),
             1_900_000_000,
         );
@@ -521,13 +513,13 @@ mod tests {
         // whitespace, then reversed keys, an escaped character, and the
         // absent party fields spelled out as null.
         let natural = r#"{
-            "schema": "gum.invoice.v4", "canonicalization": "RFC8785",
+            "schema": "gum.invoice.v5", "canonicalization": "RFC8785",
             "issuer": {"name": "Acme Corp", "email": "billing@acme.example"},
             "bill_to": {"name": "Globex", "details": "1 Main St"},
             "currency": "USDC", "decimals": "6",
             "amount_base_units": "1000000", "notes": "Thanks", "heading": null,
             "reference": "INV-1", "expiration_timestamp": "1900000000",
-            "payer_policy": {"mode": "verified_email", "expected_email": "alice@example.com"},
+            "payer_verification": {"email": {"expected_email": "alice@example.com"}, "wallet_attestation": false},
             "attachment": {"id": "0198f80c-8d2f-7dc1-a369-90556a64f700", "byte_length": "1234",
                 "sha256": "0xabababababababababababababababababababababababababababababababab"},
             "networks": [
@@ -536,9 +528,11 @@ mod tests {
                 {"chain_id": "8453", "token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
                  "factory_address": "0x5FbDB2315678afecb367f032d93F642f64180aa3"}
             ],
-            "receiver_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+            "receiver_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+            "recovery_address": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
         }"#;
-        let reversed = r#"{"receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        let reversed = r#"{"recovery_address":"0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
+            "receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
             "networks":[
                 {"factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3","chain_id":"143",
                  "token_address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603"},
@@ -546,13 +540,14 @@ mod tests {
                  "factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3","chain_id":"8453"}],
             "attachment":{"sha256":"0xabababababababababababababababababababababababababababababababab",
                 "byte_length":"1234","id":"0198f80c-8d2f-7dc1-a369-90556a64f700"},
-            "payer_policy":{"expected_email":"alice@example.com","mode":"verified_email"},
+            "payer_verification":{"wallet_attestation":false,
+                "email":{"expected_email":"alice@example.com"}},
             "expiration_timestamp":"1900000000","reference":"INV-1","heading":null,
             "notes":"\u0054hanks","amount_base_units":"1000000","decimals":"6",
             "bill_to":{"details":"1 Main St","email":null,"name":"Globex"},
             "issuer":{"details":null,"email":"billing@acme.example","name":"Acme Corp"},
             "currency":"USDC",
-            "canonicalization":"RFC8785","schema":"gum.invoice.v4"}"#;
+            "canonicalization":"RFC8785","schema":"gum.invoice.v5"}"#;
         let a: CanonicalIssuanceSnapshot = serde_json::from_str(natural).unwrap();
         let b: CanonicalIssuanceSnapshot = serde_json::from_str(reversed).unwrap();
         assert_eq!(a, snapshot());
@@ -579,22 +574,16 @@ mod tests {
             r#""token_address":"0x754704Bc059F8C67012fEd69BC8A327a5aafb603"},"#,
             r#"{"chain_id":"8453","factory_address":"0x5FbDB2315678afecb367f032d93F642f64180aa3","#,
             r#""token_address":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"}],"notes":"Thanks","#,
-            r#""payer_policy":{"expected_email":"alice@example.com","mode":"verified_email"},"#,
+            r#""payer_verification":{"email":{"expected_email":"alice@example.com"},"wallet_attestation":false},"#,
             r#""receiver_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","#,
-            r#""reference":"INV-1","schema":"gum.invoice.v4"}"#,
+            r#""recovery_address":"0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc","#,
+            r#""reference":"INV-1","schema":"gum.invoice.v5"}"#,
         );
         let bytes = canonical_bytes(&snapshot()).unwrap();
         assert_eq!(std::str::from_utf8(&bytes).unwrap(), expected);
         assert_eq!(
             attribution_hash(&bytes).to_string(),
-            "0x535c232a845fa5027d9b6537bfbb49c1118deeb418b6e23b715576de1eb657b4"
-        );
-        let attestation_digest = B256::repeat_byte(0x11);
-        assert_eq!(
-            recompute_salt(attribution_hash(&bytes), attestation_digest)
-                .0
-                .to_string(),
-            "0x17c9b0e36c56d12e1c1680af49bea8cbe7fb4e202b68fe78d30ad04ab518498d"
+            "0x5c23e19f826b027f3e42e0ebea21635c6ba60cbf59d1a0caaf753b59471925ae"
         );
     }
 
@@ -624,11 +613,11 @@ mod tests {
         let a = derive_attribution(&original).unwrap();
         let b = derive_attribution(&edited).unwrap();
         assert_ne!(a.attribution_hash, b.attribution_hash);
-        // Same attestation digest, different content: the salt and address
-        // still move.
+        // Same nonce and attestation digest, different content: the salt and
+        // address still move.
         let digest = B256::repeat_byte(0x11);
-        let salt_a = recompute_salt(a.attribution_hash, digest);
-        let salt_b = recompute_salt(b.attribution_hash, digest);
+        let salt_a = recompute_salt(NONCE, a.attribution_hash, Some(digest));
+        let salt_b = recompute_salt(NONCE, b.attribution_hash, Some(digest));
         assert_ne!(salt_a, salt_b);
         assert_ne!(address_for(&original, salt_a), address_for(&edited, salt_b));
     }
@@ -648,16 +637,15 @@ mod tests {
     }
 
     #[test]
-    fn identical_snapshots_differ_by_attestation_digest_only() {
+    fn the_nonce_separates_identical_requests() {
         // Two requests with identical text hash identically; what separates
-        // their addresses is the attestation each payer signs, whose nonce is
-        // fresh per session.
+        // their addresses is the fresh issuance nonce each carries.
         let snapshot = snapshot();
         let a = derive_attribution(&snapshot).unwrap();
         let b = derive_attribution(&snapshot).unwrap();
         assert_eq!(a, b);
-        let salt_a = recompute_salt(a.attribution_hash, B256::repeat_byte(0x11));
-        let salt_b = recompute_salt(a.attribution_hash, B256::repeat_byte(0x12));
+        let salt_a = recompute_salt(NONCE, a.attribution_hash, None);
+        let salt_b = recompute_salt(B256::repeat_byte(0x23), a.attribution_hash, None);
         assert_ne!(salt_a, salt_b);
         assert_ne!(
             address_for(&snapshot, salt_a),
@@ -666,88 +654,144 @@ mod tests {
     }
 
     #[test]
-    fn every_mode_round_trips_and_exposes_its_assertions() {
-        let cases = [
-            (
-                serde_json::json!({"mode": "permissionless"}),
-                PayerPolicy::Permissionless,
-                PayerPolicyMode::Permissionless,
-            ),
-            (
-                serde_json::json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
-                PayerPolicy::VerifiedEmail {
-                    expected_email: "alice@example.com".into(),
-                },
-                PayerPolicyMode::VerifiedEmail,
-            ),
-            (
-                serde_json::json!({"mode": "merchant_session", "payer_reference": "user_123"}),
-                PayerPolicy::MerchantSession {
-                    payer_reference: "user_123".into(),
-                },
-                PayerPolicyMode::MerchantSession,
-            ),
-        ];
-        for (json, policy, mode) in cases {
-            let parsed: PayerPolicy = serde_json::from_value(json.clone()).unwrap();
-            assert_eq!(parsed, policy);
-            assert_eq!(serde_json::to_value(&parsed).unwrap(), json);
-            assert_eq!(parsed.mode(), mode);
-            assert_eq!(mode.as_str().parse::<PayerPolicyMode>().unwrap(), mode);
-            assert_eq!(mode.is_gated(), mode != PayerPolicyMode::Permissionless);
-            assert_eq!(
-                parsed.expected_email().is_some(),
-                mode == PayerPolicyMode::VerifiedEmail
-            );
-            assert_eq!(
-                parsed.payer_reference().is_some(),
-                mode == PayerPolicyMode::MerchantSession
-            );
-            parsed.validate().unwrap();
-        }
-        assert_eq!(PayerPolicyMode::ALL.len(), 3);
+    fn the_attestation_digest_branch_is_distinct_from_the_unsigned_one() {
+        // The same request and nonce, with and without an attestation digest
+        // in the salt: different branches, different addresses.
+        let hash = derive_attribution(&snapshot()).unwrap().attribution_hash;
+        let unsigned = recompute_salt(NONCE, hash, None);
+        let attested = recompute_salt(NONCE, hash, Some(B256::repeat_byte(0x11)));
+        assert_ne!(unsigned, attested);
+        assert_ne!(
+            address_for(&snapshot(), unsigned),
+            address_for(&snapshot(), attested)
+        );
     }
 
     #[test]
-    fn assertions_are_only_accepted_where_the_mode_allows_them() {
-        let identity = serde_json::json!({"first_name": "Alice", "last_name": "Smith"});
+    fn every_add_on_combination_round_trips() {
+        let cases = [
+            (serde_json::json!({}), PayerVerification::default()),
+            (
+                serde_json::json!({"wallet_attestation": true}),
+                PayerVerification {
+                    wallet_attestation: true,
+                    ..PayerVerification::default()
+                },
+            ),
+            (
+                serde_json::json!({"email": {"expected_email": "alice@example.com"}}),
+                PayerVerification {
+                    email: Some(EmailVerification {
+                        expected_email: "alice@example.com".into(),
+                    }),
+                    ..PayerVerification::default()
+                },
+            ),
+            (
+                serde_json::json!({
+                    "email": {"expected_email": "alice@example.com"},
+                    "merchant_auth": {"payer_reference": "user_123"},
+                    "wallet_attestation": true
+                }),
+                PayerVerification {
+                    email: Some(EmailVerification {
+                        expected_email: "alice@example.com".into(),
+                    }),
+                    merchant_auth: Some(MerchantAuth {
+                        payer_reference: "user_123".into(),
+                    }),
+                    wallet_attestation: true,
+                },
+            ),
+        ];
+        for (json, verification) in &cases {
+            let parsed: PayerVerification = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(parsed, *verification);
+            parsed.validate().unwrap();
+        }
+        // The full form round-trips verbatim; sparser forms serialize with
+        // absent add-ons omitted.
+        let full = cases[3].1.clone();
+        assert_eq!(serde_json::to_value(&full).unwrap(), cases[3].0.clone());
+        assert_eq!(
+            PayerVerification::default().addons(),
+            Vec::<&'static str>::new()
+        );
+        assert_eq!(
+            full.addons(),
+            vec!["email", "merchant_auth", "wallet_attestation"]
+        );
+    }
+
+    #[test]
+    fn add_ons_reject_unknown_fields_and_bad_values() {
         for rejected in [
-            serde_json::json!({"mode": "verified_email", "expected_email": "a@b.co", "expected_identity": identity}),
-            serde_json::json!({"mode": "permissionless", "expected_email": "a@b.co"}),
-            serde_json::json!({"mode": "verified_identity", "expected_email": "a@b.co", "expected_identity": identity}),
-            serde_json::json!({"mode": "verified_identity_unattributed", "expected_email": "a@b.co"}),
-            serde_json::json!({"mode": "verified_email"}),
-            serde_json::json!({"mode": "kyc"}),
-            serde_json::json!({}),
-            serde_json::json!({"mode": "merchant_session"}),
-            serde_json::json!({"mode": "merchant_session", "expected_email": "a@b.co"}),
-            serde_json::json!({"mode": "merchant_session", "payer_reference": "u1", "expected_email": "a@b.co"}),
-            serde_json::json!({"mode": "permissionless", "payer_reference": "u1"}),
-            serde_json::json!({"mode": "verified_email", "expected_email": "a@b.co", "payer_reference": "u1"}),
+            serde_json::json!({"mode": "permissionless"}),
+            serde_json::json!({"expected_email": "a@b.co"}),
+            serde_json::json!({"email": {"expected_email": "a@b.co", "extra": 1}}),
+            serde_json::json!({"merchant_auth": {}}),
+            serde_json::json!({"email": {"expected_email": "alice@example.com", "merchant_auth": {"payer_reference": "u"}}}),
         ] {
             assert!(
-                serde_json::from_value::<PayerPolicy>(rejected.clone()).is_err(),
+                serde_json::from_value::<PayerVerification>(rejected.clone()).is_err(),
                 "{rejected}"
             );
         }
     }
 
     #[test]
+    fn gating_is_any_identity_add_on() {
+        assert!(!PayerVerification::default().is_gated());
+        assert!(
+            !PayerVerification {
+                wallet_attestation: true,
+                ..PayerVerification::default()
+            }
+            .is_gated()
+        );
+        assert!(
+            PayerVerification {
+                email: Some(EmailVerification {
+                    expected_email: "a@b.co".into(),
+                }),
+                ..PayerVerification::default()
+            }
+            .is_gated()
+        );
+        assert!(
+            PayerVerification {
+                merchant_auth: Some(MerchantAuth {
+                    payer_reference: "u".into(),
+                }),
+                wallet_attestation: true,
+                ..PayerVerification::default()
+            }
+            .is_gated()
+        );
+    }
+
+    #[test]
     fn validation_rejects_bad_emails() {
         for email in ["not-an-email", "a@b", " alice@example.com", "a@.com", ""] {
-            let policy = PayerPolicy::VerifiedEmail {
-                expected_email: email.into(),
+            let verification = PayerVerification {
+                email: Some(EmailVerification {
+                    expected_email: email.into(),
+                }),
+                ..PayerVerification::default()
             };
             assert_eq!(
-                policy.validate(),
+                verification.validate(),
                 Err(PayerPolicyError::InvalidExpectedEmail),
                 "{email:?}"
             );
         }
         let long = "x".repeat(250) + "@e.com";
         assert!(
-            PayerPolicy::VerifiedEmail {
-                expected_email: long
+            PayerVerification {
+                email: Some(EmailVerification {
+                    expected_email: long
+                }),
+                ..PayerVerification::default()
             }
             .validate()
             .is_err()
@@ -764,11 +808,14 @@ mod tests {
             "user\u{0}",
             &"x".repeat(129),
         ] {
-            let policy = PayerPolicy::MerchantSession {
-                payer_reference: reference.to_owned(),
+            let verification = PayerVerification {
+                merchant_auth: Some(MerchantAuth {
+                    payer_reference: reference.to_owned(),
+                }),
+                ..PayerVerification::default()
             };
             assert_eq!(
-                policy.validate(),
+                verification.validate(),
                 Err(PayerPolicyError::InvalidPayerReference),
                 "{reference:?}"
             );
@@ -780,15 +827,21 @@ mod tests {
             &"x".repeat(128),
             "ürsula",
         ] {
-            PayerPolicy::MerchantSession {
-                payer_reference: reference.to_owned(),
+            PayerVerification {
+                merchant_auth: Some(MerchantAuth {
+                    payer_reference: reference.to_owned(),
+                }),
+                ..PayerVerification::default()
             }
             .validate()
             .unwrap_or_else(|error| panic!("{reference:?}: {error}"));
         }
         // Trimmed, never lowercased: the merchant's identifier is opaque.
-        let normalized = PayerPolicy::MerchantSession {
-            payer_reference: "  User_ABC ".into(),
+        let normalized = PayerVerification {
+            merchant_auth: Some(MerchantAuth {
+                payer_reference: "  User_ABC ".into(),
+            }),
+            ..PayerVerification::default()
         }
         .normalized();
         assert_eq!(normalized.payer_reference(), Some("User_ABC"));
@@ -797,19 +850,22 @@ mod tests {
 
     #[test]
     fn normalization_trims_and_lowercases_the_expected_email() {
-        let policy = PayerPolicy::VerifiedEmail {
-            expected_email: "  Alice@Example.COM ".into(),
+        let verification = PayerVerification {
+            email: Some(EmailVerification {
+                expected_email: "  Alice@Example.COM ".into(),
+            }),
+            ..PayerVerification::default()
         };
         assert_eq!(
-            policy.validate(),
+            verification.validate(),
             Err(PayerPolicyError::InvalidExpectedEmail)
         );
-        let normalized = policy.normalized();
+        let normalized = verification.normalized();
         assert_eq!(normalized.expected_email(), Some("alice@example.com"));
         normalized.validate().unwrap();
         assert_eq!(
-            PayerPolicy::Permissionless.normalized(),
-            PayerPolicy::Permissionless
+            PayerVerification::default().normalized(),
+            PayerVerification::default()
         );
     }
 

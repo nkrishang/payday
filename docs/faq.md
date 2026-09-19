@@ -3,7 +3,8 @@
 ## What is the difference between a deposit request and a deposit?
 
 The deposit request is the document you issue: issuer and payer parties, one amount,
-optional notes, heading, reference, and metadata, a payer policy, and at most
+optional notes, heading, reference, and metadata, optional verification
+add-ons, and at most
 one PDF. The deposit request is its on-chain fulfilment at a one-time address. The API
 resource is the deposit request, and the deposit request's state is read from it.
 Issued deposit requests are immutable — to change one, cancel it and issue another.
@@ -16,13 +17,17 @@ but never parses it. Gum does not model line items, tax rates, tax IDs, or
 fiat, and does not intend to. Bounded free-text `details` on each party and
 the PDF are where that information goes.
 
-## What are the payer modes?
+## What are the verification add-ons?
 
-`permissionless` lets anyone with the link pay, as before. `verified_email`
-requires the payer to prove ownership of the mailbox you name. For
-`verified_email` the checkout hides the amount, parties, PDF, and address
-until verification completes; funds sent before then are flagged as likely
-unsolicited. Gum reports pass or fail, not the payer's own data.
+A deposit request can carry any combination of three independent, optional
+add-ons; the default is none, which is fully permissionless. **Email
+verification** requires the payer to prove ownership of the mailbox you name.
+**Merchant auth** lets your own application open the checkout for a user it
+has signed in, with a single-use client secret. **Wallet attestation** asks
+the payer to sign an EIP-712 attestation from the wallet they will pay from.
+For email verification and merchant auth the checkout hides the amount,
+parties, PDF, and address until the check completes; Gum reports pass or
+fail, not the payer's own data.
 
 ## How do PDF attachments work?
 
@@ -49,15 +54,16 @@ A deposit request is denominated in one `currency`: `USDC` (default) or
 `USDT`. USDC is Circle's native USDC on Monad, Base, or Arbitrum One (their
 testnets in the sandbox); USDT is Tether's USDT0 on Monad or Arbitrum One
 only, and is not offered in the sandbox. For a USDC request the payer chooses
-the network on the hosted checkout before signing; a USDT request pins
+the network on the hosted checkout; a USDT request pins
 `chain_id` at creation. Read `networks` from the deposit request, then
 `chain` and `token` once the payer has chosen. A matching symbol is not
 enough: bridged wrappers, look-alike tokens, and the chain's gas currency do
 not count and may be unrecoverable. The other Gum stablecoin sent to the
-address is never credited; anyone can return it to the payer with
-`recover(address)` on the deposit contract. The right token sent to the
+address is never credited; anyone can forward it to Gum's recovery custody
+with `recover(address)` on the deposit contract, from which Gum returns it
+to the payer after review. The right token sent to the
 address on a different supported network is refused by the contract and
-returned to the payer by hand.
+recovered into Gum's custody, then returned to the payer after review.
 
 ## Why must a USDT request name its network?
 
@@ -70,12 +76,16 @@ route; Relay swaps and the payer carries the spread.
 
 ## What is the deposit address?
 
-It is a unique counterfactual smart-contract address for one deposit request and one
-payer wallet. It exists once the payer has signed the request's attestation
-from the wallet they will pay from; funds can then arrive before the contract
-exists, and deployment later routes its balance under the amount, payout,
-expiry, and recovery terms committed into that address, the recovery term
-being the payer's own wallet. Never reuse it for another order.
+It is a unique counterfactual smart-contract address for one deposit request.
+It exists once the deposit request's network is fixed — immediately when
+`chain_id` is pinned (or the deployment offers one network), otherwise after
+the payer picks a network on the hosted checkout, and, on a request with the
+wallet-attestation add-on, only after the payer signs the attestation. Funds
+can arrive before the contract exists, and deployment later routes its
+balance under the amount, payout, expiry, and recovery terms committed into
+that address, the recovery term being Gum's dedicated KMS recovery wallet.
+Without wallet attestation the payer may pay from any wallet, an exchange
+withdrawal included. Never reuse it for another order.
 
 ## What should I give the payer?
 
@@ -99,21 +109,25 @@ as a deposit request.
   reach the requested amount.
 - `partially_deposited` remains open while the finalized total is short.
 - On-time execution sends exactly the requested amount to payout. Any excess goes
-  back to the payer's attested wallet in the same transaction; it is never
-  forwarded to the merchant.
-- If execution happens after expiry, the complete balance goes back to the
-  payer's attested wallet—even if enough arrived earlier.
+  to Gum's recovery custody in the same transaction; it is never
+  forwarded to the merchant, and Gum returns it to the payer manually after
+  review.
+- If execution happens after expiry, the complete balance goes to Gum's
+  recovery custody — even if enough arrived earlier.
 
 Leave time for inclusion, finality, and settlement before the deadline.
 
 ## Where do expired or late funds go?
 
-An underpaid address is returned after expiry. Funds sent after expiry
-or after the deposit contract executes is forwarded to the payer's attested
-wallet (`recovery_address` on the deposit request, always equal to `payer_wallet`).
-Gum holds nothing: every return is on-chain and recorded against the
-deposit. A payer who sent from a wallet other than the one they signed with
-will find the return in the attested wallet.
+An underpaid address is recovered after expiry. Funds sent after expiry
+or after the deposit contract executes are recovered into Gum's recovery
+custody (`recovery_address` on the deposit request, always Gum's dedicated
+KMS recovery wallet). Gum returns every recovered amount to the payer
+manually, after review; it is never an automatic on-chain return to the
+payer's wallet. Each recovery is recorded against the deposit and reported by
+a `deposit_request.recovered_funds` webhook. A payer who sent from a wallet
+other than the one they attested — on a wallet-attested request — is returned
+their funds through the same review process.
 
 ## Can I cancel or refund through Gum?
 
@@ -130,7 +144,7 @@ holds something for one of your deposit requests.
 Save the `dr_…` ID and your own `reference`. Look up a deposit request by complete
 ID or deposit address. List newest-first with optional status/reference
 filters and cursor pagination; summaries carry the heading, payer name,
-policy mode, customer, and verification state. The transfers endpoint provides
+verification add-ons, customer, and verification state. The transfers endpoint provides
 finalized sender, transaction, amount, block, disposition, and collection
 state, and the Proof of Payment is the durable reconciliation record.
 
@@ -180,4 +194,4 @@ Check the public service status first. For deposit or authentication support,
 email `support@gum.money` with the deposit request ID and API `request_id`. Never send
 API keys, OTPs, signer keys, webhook secrets, or unnecessary personal data.
 Report software or documentation defects through
-[GitHub issues](https://github.com/nkrishang/payday/issues).
+[GitHub issues](https://github.com/nkrishang/gum/issues).

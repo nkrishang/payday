@@ -207,6 +207,10 @@ USDT="${GUM_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   # (0x976EA74026E726554dB657fA54763abd0C3a0aa9), the trusted attestor for
   # local proof verification; production signs with a KMS key instead.
   export GUM_ATTESTATION_SIGNER_KEY="${GUM_ATTESTATION_SIGNER_KEY:-0x92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e}"
+  # Gum's own recovery wallet: the recovery address every payment contract is
+  # deployed with. Recovery is manual (a dedicated production key handled by
+  # the operator), so locally any fixed address stands in for it.
+  export GUM_RECOVERY_ADDRESS="${GUM_RECOVERY_ADDRESS:-0xf78b72F68d560c06C36c3BeF86F1f055b83221e5}"
   # Payer email verification against the development provider's payer client
   # and audience.
   export GUM_PAYER_AUTH0_ISSUER="${GUM_PAYER_AUTH0_ISSUER:-$GUM_DEV_IDENTITY_ISSUER}"

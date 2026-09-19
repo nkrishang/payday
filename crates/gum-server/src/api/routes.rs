@@ -204,6 +204,10 @@ pub fn router(state: AppState) -> Router {
             post(payer_verification::confirm_email),
         )
         .route(
+            "/v1/payer/deposit-requests/{id}/network",
+            post(payer_wallet::select_network),
+        )
+        .route(
             "/v1/payer/deposit-requests/{id}/wallet/challenge",
             post(payer_wallet::challenge),
         )
@@ -416,6 +420,8 @@ mod tests {
     const KEY: &str = "gum_live_0123456789abcdef0123456789abcdef";
     /// The wallet the test payer signs attestations with.
     const PAYER_KEY: [u8; 32] = [7u8; 32];
+    /// The test deployment's `GUM_RECOVERY_ADDRESS`, set on every state.
+    const RECOVERY_ADDRESS: Address = Address::repeat_byte(0x14);
     /// A minimal PDF, byte for byte what the e2e suite uploads.
     const PDF: &[u8] = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF";
 
@@ -527,6 +533,7 @@ mod tests {
             accounts,
             merchant_verifier,
             networks,
+            RECOVERY_ADDRESS,
             payer_access(),
             "gum_live_".into(),
             Some(WEBHOOK_KEY),
@@ -725,40 +732,30 @@ mod tests {
             .unwrap()
     }
 
-    /// The payer's wallet step over HTTP: ask for the challenge, sign it
-    /// with `key`, and attest. Returns the unlocked payer response (which
-    /// now carries the address) and the session the binding was made in.
-    async fn bind_wallet(
+    /// The payer picks the network they will pay on, the step that mints
+    /// the address for a request without the wallet-attestation add-on.
+    /// A gated request answers only its verified session.
+    async fn choose_network(app: &Router, id: &str) -> (Value, String) {
+        choose_network_as(app, id, None, "1").await
+    }
+
+    async fn choose_network_as(
         app: &Router,
         id: &str,
         session: Option<&str>,
-        key: &[u8; 32],
+        chain_id: &str,
     ) -> (Value, String) {
-        let wallet = gum_core::wallet_of(key);
-        let challenge = app
+        let chosen = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
+                &format!("/v1/payer/deposit-requests/{id}/network"),
                 session,
-                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "1"})),
+                Some(&json!({"chain_id": chain_id})),
             ))
             .await
             .unwrap();
-        assert_eq!(challenge.status(), StatusCode::OK, "wallet challenge");
-        let challenge = json_body(challenge).await;
-        let session = challenge["payer_session"].as_str().unwrap().to_owned();
-        let signature = sign_challenge(&challenge, key);
-        let attested = app
-            .clone()
-            .oneshot(payer_post(
-                &format!("/v1/payer/deposit-requests/{id}/wallet/attest"),
-                Some(&session),
-                Some(&json!({"wallet": wallet.to_checksum(None), "signature": signature})),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(attested.status(), StatusCode::OK, "wallet attest");
-        (json_body(attested).await, session)
+        assert_eq!(chosen.status(), StatusCode::OK, "network choice");
+        (json_body(chosen).await, String::new())
     }
 
     /// Sign the typed data a challenge response carries, as a wallet would.
@@ -783,13 +780,13 @@ mod tests {
     async fn create_gated(
         app: &Router,
         key: &str,
-        policy: Value,
+        verification: Value,
         heading: &str,
     ) -> (String, Value) {
         let mut body = valid_body();
         body["heading"] = json!(heading);
         body["reference"] = json!("INV-9");
-        body["payer_policy"] = policy;
+        body["verification"] = verification;
         let created = app
             .clone()
             .oneshot(create_request(KEY, key, &body))
@@ -900,8 +897,7 @@ mod tests {
             "amount": "1",
             "expires_in": 3600,
             "issuer": {"name": "Acme"},
-            "payer": {"name": "Globex"},
-            "payer_policy": {"mode": "permissionless"}
+            "payer": {"name": "Globex"}
         })
     }
 
@@ -1121,7 +1117,7 @@ mod tests {
         // No address until the payer attests a wallet.
         assert!(body["address"].is_null());
         assert!(body["payer_wallet"].is_null());
-        assert!(body["recovery_address"].is_null());
+        assert_eq!(body["recovery_address"], RECOVERY_ADDRESS.to_checksum(None));
         assert!(body["self_settlement"].is_null());
         let id = body["id"].as_str().unwrap();
         assert!(id.starts_with("dr_"));
@@ -1293,7 +1289,7 @@ mod tests {
         .await;
         assert!(unbound["as_of"].is_null());
         assert!(unbound["indexer_freshness"]["last_indexed_block"].is_null());
-        bind_wallet(&app, &id, None, &PAYER_KEY).await;
+        choose_network(&app, &id).await;
         sqlx::query("INSERT INTO indexer_cursor(chain_id,last_block,last_block_hash,last_block_timestamp) VALUES(1,117,$1,1700000000)")
             .bind([1_u8; 32].as_slice()).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO indexer_status(chain_id,finalized_block,finalized_block_hash,finalized_block_timestamp) VALUES(1,120,$1,1700000012)")
@@ -1322,7 +1318,6 @@ mod tests {
             "amount": "1",
             "issuer": {"name": "Acme"},
             "payer": {"name": "Globex"},
-            "payer_policy": {"mode": "permissionless"},
             "reference": "Order 1234"
         });
         let created = app
@@ -1342,19 +1337,25 @@ mod tests {
             Address::ZERO.to_checksum(None)
         );
         assert_eq!(created["networks"][1]["chain"]["id"], "2");
-        assert!(created["recovery_address"].is_null());
+        // The recovery term is Gum's own wallet from issuance, whatever
+        // the payer later attests.
+        assert_eq!(
+            created["recovery_address"],
+            RECOVERY_ADDRESS.to_checksum(None)
+        );
         assert_eq!(created["reference"], "Order 1234");
         assert!(created.get("memo").is_none());
         assert_eq!(created["issuer"]["name"], "Acme");
         assert_eq!(created["payer"]["name"], "Globex");
-        assert_eq!(created["payer_policy"]["mode"], "permissionless");
-        assert_eq!(created["attribution"]["version"], 4);
+        // No add-ons attached: `verification` serializes the empty default.
+        assert_eq!(created["verification"]["wallet_attestation"], false);
+        assert_eq!(created["attribution"]["version"], 5);
         assert_eq!(created["currency"], "USDC");
         assert!(created["attachment"].is_null());
         assert_eq!(created["expires_in"], 86_400);
-        // The address exists once the payer binds a wallet, and it is the
-        // merchant's lookup key from then on.
-        let (bound, _) = bind_wallet(&app, id, None, &PAYER_KEY).await;
+        // The address exists once the payer chooses a network, and it is
+        // the merchant's lookup key from then on.
+        let (bound, _) = choose_network(&app, id).await;
         let address = bound["address"].as_str().unwrap();
 
         let found = app
@@ -1416,9 +1417,10 @@ mod tests {
         )
         .await;
         assert_eq!(transfers["transfers"], json!([]));
+        // Always present, empty for the permissionless default.
         assert_eq!(
-            listed["deposit_requests"][0]["payer_policy_mode"],
-            "permissionless"
+            listed["deposit_requests"][0]["verification"]["wallet_attestation"],
+            false
         );
         assert_eq!(listed["deposit_requests"][0]["has_attachment"], false);
 
@@ -1502,10 +1504,12 @@ mod tests {
         assert_eq!(status["issuer_name"], "Acme");
         assert_eq!(status["amount_base_units"], "1000000");
         assert_eq!(status["details"]["payer"]["name"], "Globex");
-        assert_eq!(status["payer_policy"]["mode"], "permissionless");
+        // No add-ons attached: nothing to verify, any wallet may pay.
+        assert!(status.get("verification").is_none());
         assert_eq!(status["requirements"]["complete"], true);
-        assert!(status["deposit_uri"].is_null(), "no wallet is bound yet");
-        let (status, _) = bind_wallet(&app, id, None, &PAYER_KEY).await;
+        assert_eq!(status["requirements"]["wallet"], "not_required");
+        assert!(status["deposit_uri"].is_null(), "no network is chosen yet");
+        let (status, _) = choose_network(&app, id).await;
         assert!(status["deposit_uri"].as_str().unwrap().starts_with(
             "ethereum:0x0000000000000000000000000000000000000000@1/transfer?address="
         ));
@@ -1619,9 +1623,8 @@ mod tests {
             "reference": "INV-1",
             "metadata": {"po": "42"},
             "customer_id": customer_id,
-            "payer_policy": {
-                "mode": "verified_email",
-                "expected_email": "Alice@Example.com"
+            "verification": {
+                "email": {"expected_email": "Alice@Example.com"}
             },
             "attachment_id": first_pdf
         });
@@ -1638,7 +1641,7 @@ mod tests {
         assert_eq!(created["attachment"]["byte_length"], "1234");
         assert!(created["attachment"].get("download_url").is_none());
         assert_eq!(
-            created["payer_policy"]["expected_email"],
+            created["verification"]["email"]["expected_email"],
             "alice@example.com"
         );
         assert_eq!(created["heading"], "March retainer");
@@ -1673,11 +1676,11 @@ mod tests {
         vary("customer_id", &|b| {
             b.as_object_mut().unwrap().remove("customer_id");
         });
-        vary("policy mode", &|b| {
-            b["payer_policy"] = json!({"mode": "permissionless"})
+        vary("verification", &|b| {
+            b.as_object_mut().unwrap().remove("verification");
         });
         vary("expected_email", &|b| {
-            b["payer_policy"]["expected_email"] = json!("bob@example.com")
+            b["verification"]["email"]["expected_email"] = json!("bob@example.com")
         });
         vary("expiration intent", &|b| b["expires_in"] = json!(7200));
         vary("amount", &|b| b["amount"] = json!("26"));
@@ -1787,8 +1790,8 @@ mod tests {
             ),
             (
                 "bad expected email",
-                "payer_policy",
-                json!({"mode": "verified_email", "expected_email": "not-an-email"}),
+                "verification",
+                json!({"email": {"expected_email": "not-an-email"}}),
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
             ),
@@ -1823,9 +1826,8 @@ mod tests {
 
         // The mode rules are enforced by the wire shape itself.
         let mut body = valid_body();
-        body["payer_policy"] = json!({
-            "mode": "verified_email",
-            "expected_email": "alice@example.com",
+        body["verification"] = json!({
+            "email": {"expected_email": "alice@example.com"},
             "expected_identity": {"first_name": "Alice", "last_name": "Smith"}
         });
         let response = app
@@ -1853,8 +1855,7 @@ mod tests {
         body["notes"] = json!("Net 30");
         body["reference"] = json!("INV-1");
         body["attachment_id"] = json!(pdf);
-        body["payer_policy"] =
-            json!({"mode": "verified_email", "expected_email": "alice@example.com"});
+        body["verification"] = json!({"email": {"expected_email": "alice@example.com"}});
         let created = app
             .clone()
             .oneshot(create_request(KEY, "gated", &body))
@@ -1864,7 +1865,7 @@ mod tests {
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap();
         assert_eq!(
-            created["payer_policy"]["expected_email"],
+            created["verification"]["email"]["expected_email"],
             "alice@example.com"
         );
 
@@ -1883,11 +1884,7 @@ mod tests {
         assert_eq!(payer["issuer_name"], "Acme");
         assert_eq!(payer["heading"], "March retainer");
         assert_eq!(payer["status"], "awaiting_deposit");
-        assert_eq!(payer["payer_policy"]["mode"], "verified_email");
-        assert_eq!(
-            payer["payer_policy"]["expected_email_hint"],
-            "a****@e***.com"
-        );
+        assert_eq!(payer["expected_email_hint"], "a****@e***.com");
         assert_eq!(payer["requirements"]["email"], "pending");
         assert!(payer["requirements"].get("document").is_none());
         assert_eq!(payer["requirements"]["complete"], false);
@@ -1991,6 +1988,9 @@ mod tests {
             .await
             .unwrap();
         let completed = json_body(completed).await;
+        // Without a session every attached add-on still reads pending, so
+        // the checkout offers its controls: this browser's view stays
+        // locked all the same.
         assert_eq!(completed["requirements"]["email"], "pending");
         assert_eq!(completed["requirements"]["complete"], false);
         assert_eq!(completed["content_unlocked"], false);
@@ -2075,8 +2075,8 @@ mod tests {
     }
 
     /// The payer, not the merchant, picks the network: the create route
-    /// refuses chain fields, and a challenge on the second network signs
-    /// under that chain's domain and binds the request there.
+    /// refuses chain fields, and the network route binds the request to the
+    /// chosen chain and mints its address there.
     #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
     async fn the_payer_chooses_the_network(pool: PgPool) {
         let app = app(pool.clone()).await;
@@ -2107,33 +2107,34 @@ mod tests {
         assert_eq!(created.status(), StatusCode::CREATED);
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap().to_owned();
-        let wallet = gum_core::wallet_of(&PAYER_KEY);
-        let challenge = app
+        // A network the request does not offer is refused before anything
+        // binds; a malformed id is refused like any bad field.
+        let network_path = format!("/v1/payer/deposit-requests/{id}/network");
+        let malformed = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
+                &network_path,
                 None,
-                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "2"})),
+                Some(&json!({"chain_id": "two"})),
             ))
             .await
             .unwrap();
-        assert_eq!(challenge.status(), StatusCode::OK);
-        let challenge = json_body(challenge).await;
-        assert_eq!(challenge["chain"]["id"], "2");
-        assert_eq!(challenge["typed_data"]["domain"]["chainId"], 2);
-        let session = challenge["payer_session"].as_str().unwrap().to_owned();
-        let signature = sign_challenge(&challenge, &PAYER_KEY);
-        let bound = app
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        let elsewhere = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/deposit-requests/{id}/wallet/attest"),
-                Some(&session),
-                Some(&json!({"wallet": wallet.to_checksum(None), "signature": signature})),
+                &network_path,
+                None,
+                Some(&json!({"chain_id": "3"})),
             ))
             .await
             .unwrap();
-        assert_eq!(bound.status(), StatusCode::OK);
-        let bound = json_body(bound).await;
+        assert_eq!(elsewhere.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(elsewhere).await["error"]["code"],
+            "unsupported_chain"
+        );
+        let (bound, _) = choose_network_as(&app, &id, None, "2").await;
         assert_eq!(bound["chain"]["id"], "2");
         assert_eq!(
             bound["token"]["address"],
@@ -2155,8 +2156,8 @@ mod tests {
         assert_eq!(merchant["chain"]["id"], "2");
         assert_eq!(merchant["self_settlement"]["chain_id"], "2");
 
-        // The same document bound on chain 1 lands at another address: the
-        // chain is committed into it like the wallet.
+        // The same request bound on chain 1 lands at another address: the
+        // chain is committed into the salt like everything else.
         let other = json_body(
             app.clone()
                 .oneshot(create_request(KEY, "first-network", &valid_body()))
@@ -2164,9 +2165,65 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        let (on_one, _) = bind_wallet(&app, other["id"].as_str().unwrap(), None, &PAYER_KEY).await;
+        let (on_one, _) = choose_network(&app, other["id"].as_str().unwrap()).await;
         assert_eq!(on_one["chain"]["id"], "1");
         assert_ne!(on_one["address"], bound["address"]);
+
+        // Re-choosing the chosen network is the idempotent replay the
+        // endpoint promises: it answers with the request's current state,
+        // not a conflict.
+        let (replayed, _) = choose_network(&app, other["id"].as_str().unwrap()).await;
+        assert_eq!(replayed["address"], on_one["address"]);
+    }
+
+    /// A merchant-preview session sees everything but proves nothing and
+    /// binds nothing: network selection is a payer action, so a preview
+    /// session is refused like any session that is not the payer's.
+    #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
+    async fn a_preview_session_cannot_choose_the_network(pool: PgPool) {
+        let app = app(pool).await;
+        let (id, _) = create_gated(
+            &app,
+            "preview-network",
+            json!({"email": {"expected_email": "alice@example.com"}}),
+            "Preview network",
+        )
+        .await;
+
+        let minted = app
+            .clone()
+            .oneshot(preview_session_request(KEY, &id))
+            .await
+            .unwrap();
+        assert_eq!(minted.status(), StatusCode::OK);
+        let session = json_body(minted).await["payer_session"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let refused = app
+            .clone()
+            .oneshot(payer_post(
+                &format!("/v1/payer/deposit-requests/{id}/network"),
+                Some(&session),
+                Some(&json!({"chain_id": "1"})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(refused).await["error"]["code"],
+            "payer_session_invalid"
+        );
+        // Nothing bound: the payer still gets to choose.
+        let merchant = json_body(
+            app.clone()
+                .oneshot(get_request(KEY, &format!("/v1/deposit-requests/{id}")))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(merchant["chain"].is_null());
     }
 
     /// A merchant may pin the network at issuance. The request then offers
@@ -2226,11 +2283,10 @@ mod tests {
             created["token"]["address"],
             Address::repeat_byte(0x02).to_checksum(None)
         );
-        assert!(
-            created["address"].is_null(),
-            "the address still waits for the wallet"
-        );
-        assert!(created["self_settlement"].is_null());
+        // The address exists right away: a permissionless request with a
+        // known network needs no payer signature at all.
+        assert!(created["address"].is_string());
+        assert!(created["self_settlement"].is_object());
 
         // The payer page names it too, and offers nothing else.
         let payer_view = json_body(
@@ -2242,15 +2298,17 @@ mod tests {
         .await;
         assert_eq!(payer_view["chain"]["id"], "2");
         assert_eq!(payer_view["networks"].as_array().unwrap().len(), 1);
-        assert!(payer_view["address"].is_null());
+        assert!(payer_view["address"].is_string());
 
-        let wallet = gum_core::wallet_of(&PAYER_KEY);
+        // The network choice is final: another of the request's networks —
+        // here, any but the pinned one — is refused, and re-choosing the
+        // same one is idempotent.
         let elsewhere = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
+                &format!("/v1/payer/deposit-requests/{id}/network"),
                 None,
-                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "1"})),
+                Some(&json!({"chain_id": "1"})),
             ))
             .await
             .unwrap();
@@ -2259,33 +2317,17 @@ mod tests {
             json_body(elsewhere).await["error"]["code"],
             "unsupported_chain"
         );
-
-        let challenge = app
+        let again = app
             .clone()
             .oneshot(payer_post(
-                &format!("/v1/payer/deposit-requests/{id}/wallet/challenge"),
+                &format!("/v1/payer/deposit-requests/{id}/network"),
                 None,
-                Some(&json!({"wallet": wallet.to_checksum(None), "chain_id": "2"})),
+                Some(&json!({"chain_id": "2"})),
             ))
             .await
             .unwrap();
-        assert_eq!(challenge.status(), StatusCode::OK);
-        let challenge = json_body(challenge).await;
-        let session = challenge["payer_session"].as_str().unwrap().to_owned();
-        let signature = sign_challenge(&challenge, &PAYER_KEY);
-        let bound = app
-            .clone()
-            .oneshot(payer_post(
-                &format!("/v1/payer/deposit-requests/{id}/wallet/attest"),
-                Some(&session),
-                Some(&json!({"wallet": wallet.to_checksum(None), "signature": signature})),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(bound.status(), StatusCode::OK);
-        let bound = json_body(bound).await;
-        assert_eq!(bound["chain"]["id"], "2");
-        assert!(bound["address"].is_string());
+        assert_eq!(again.status(), StatusCode::OK);
+        assert_eq!(json_body(again).await["chain"]["id"], "2");
 
         // Idempotency: the same key replays; another pin conflicts.
         let replay = app
@@ -2307,11 +2349,11 @@ mod tests {
     }
 
     /// Paying from another chain through Relay: the checkout lists the
-    /// chains USDC may come from, asks for a quote pinned to the attested
-    /// wallet and the payment address, reports the origin transaction, and
-    /// follows the intent on the payer view. Once the indexer attributes
-    /// the solver's transfer, the proof carries the origin the attestation
-    /// vouches for and still verifies offline.
+    /// chains USDC may come from, chooses the payment network, quotes a
+    /// route for the wallet the payer names, reports the origin
+    /// transaction, and follows the intent on the payer view. Once the
+    /// indexer attributes the solver's transfer, the proof carries the
+    /// origin and still verifies offline.
     #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
     async fn a_payer_may_pay_from_another_chain_through_relay(pool: PgPool) {
         let app = build_relay(pool.clone()).await.router;
@@ -2342,7 +2384,7 @@ mod tests {
         assert_eq!(early.status(), StatusCode::CONFLICT);
         assert_eq!(json_body(early).await["error"]["code"], "wallet_required");
 
-        let (bound, _) = bind_wallet(&app, &id, None, &PAYER_KEY).await;
+        let (bound, _) = choose_network(&app, &id).await;
         let address = Address::parse_checksummed(bound["address"].as_str().unwrap(), None).unwrap();
         let payer_wallet = gum_core::wallet_of(&PAYER_KEY);
         let ready = json_body(app.clone().oneshot(payer_view(None)).await.unwrap()).await;
@@ -2384,7 +2426,10 @@ mod tests {
                 .oneshot(payer_post(
                     &quotes,
                     None,
-                    Some(&json!({"origin_chain_id": origin})),
+                    Some(&json!({
+                        "origin_chain_id": origin,
+                        "payer_wallet": payer_wallet.to_checksum(None)
+                    })),
                 ))
                 .await
                 .unwrap();
@@ -2409,14 +2454,18 @@ mod tests {
             .unwrap();
         assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
 
-        // The quote: exactly the amount due lands, from the attested wallet
-        // on Base, in an approve and a deposit for the page to send.
+        // The quote: exactly the amount due lands, from the payer's wallet
+        // on Base, in an approve and a deposit for the page to send. The
+        // wallet is the payer's own assertion: nothing is attested here.
         let quoted = app
             .clone()
             .oneshot(payer_post(
                 &quotes,
                 None,
-                Some(&json!({"origin_chain_id": "8453"})),
+                Some(&json!({
+                    "origin_chain_id": "8453",
+                    "payer_wallet": payer_wallet.to_checksum(None)
+                })),
             ))
             .await
             .unwrap();
@@ -2583,21 +2632,24 @@ mod tests {
         assert_eq!(relay.origin_chain_id, "8453");
         assert_eq!(relay.origin_transaction_hash, origin_tx.to_string());
         assert_eq!(relay.attribution_source, "receipt");
-        assert_eq!(proof.verification.payload.relay_fills.len(), 1);
-        assert_eq!(
-            proof.verification.payload.relay_fills[0].transaction_hash,
-            fill.to_string()
-        );
+        // The origin is vouched on the transfer itself; a settlement-scope
+        // attestation carries no wallet-vouched fills.
+        assert!(proof.verification.payload.relay_fills.is_empty());
         let verified = verify_proof(&proof, None, &[attestor().address()])
             .unwrap_or_else(|error| panic!("the relayed proof must verify offline: {error}"));
-        assert_eq!(verified.payer_wallet, payer_wallet);
+        // A request without the wallet-attestation add-on proves settlement
+        // only: no wallet claims, the origin is the intent's own record.
+        assert_eq!(verified.payer_wallet, None);
+        // The origin sender is provenance, not a claim: editing it leaves a
+        // proof that still verifies, because settlement scope vouches for
+        // nothing about whose wallet paid.
         let mut edited = proof.clone();
         edited.transfers[0].relay.as_mut().unwrap().origin_sender =
             Address::repeat_byte(0x77).to_checksum(None);
-        assert!(matches!(
-            verify_proof(&edited, None, &[attestor().address()]).unwrap_err(),
-            ProofError::TransferSenderMismatch
-        ));
+        assert!(
+            verify_proof(&edited, None, &[attestor().address()]).is_ok(),
+            "settlement scope carries no origin claim to break"
+        );
     }
 
     /// Without a Relay key nothing is offered: the payer view says so and
@@ -2624,7 +2676,7 @@ mod tests {
         )
         .await;
         let id = created["id"].as_str().unwrap().to_owned();
-        bind_wallet(&app, &id, None, &PAYER_KEY).await;
+        choose_network(&app, &id).await;
         let view = json_body(
             app.clone()
                 .oneshot(payer_get(&format!("/v1/payer/deposit-requests/{id}"), None))
@@ -2652,15 +2704,18 @@ mod tests {
     #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
     async fn payer_wallet_binding_derives_the_address_and_is_final(pool: PgPool) {
         let app = app(pool.clone()).await;
+        let mut body = valid_body();
+        body["verification"] = json!({"wallet_attestation": true});
         let created = app
             .clone()
-            .oneshot(create_request(KEY, "bind", &valid_body()))
+            .oneshot(create_request(KEY, "bind", &body))
             .await
             .unwrap();
         assert_eq!(created.status(), StatusCode::CREATED);
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap().to_owned();
         let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
+        assert_eq!(created["verification"]["wallet_attestation"], true);
         assert!(created["address"].is_null());
         assert!(created.get("refund_address").is_none());
 
@@ -2822,8 +2877,9 @@ mod tests {
             assert!(bound.get(private).is_none(), "{private}");
         }
 
-        // The merchant sees the same address, the wallet as the recovery
-        // term, and the material to settle it themselves; the row's binding
+        // The merchant sees the same address, Gum's recovery wallet as
+        // the recovery term (recovery is never the payer's, even attested),
+        // and the material to settle it themselves; the row's binding
         // recomputes to the address it stored.
         let merchant = app
             .clone()
@@ -2833,7 +2889,10 @@ mod tests {
         let merchant = json_body(merchant).await;
         assert_eq!(merchant["address"], address);
         assert_eq!(merchant["payer_wallet"], wallet.to_checksum(None));
-        assert_eq!(merchant["recovery_address"], wallet.to_checksum(None));
+        assert_eq!(
+            merchant["recovery_address"],
+            RECOVERY_ADDRESS.to_checksum(None)
+        );
         assert!(merchant["wallet_bound_at"].is_string());
         assert!(merchant["self_settlement"]["salt"].is_string());
         assert_eq!(merchant["self_settlement"]["chain_id"], "1");
@@ -2845,16 +2904,18 @@ mod tests {
             .unwrap();
         let invoice = Invoice::try_from(&row).unwrap();
         let binding = invoice.binding.as_ref().unwrap();
-        assert_eq!(binding.payer_wallet, wallet);
-        assert_eq!(binding.recovery.0, wallet);
+        let evidence = binding.wallet.as_ref().unwrap();
+        assert_eq!(evidence.payer_wallet, wallet);
+        assert_eq!(binding.recovery.0, RECOVERY_ADDRESS);
         assert_eq!(binding.network.chain_id, ChainId(1));
         assert_eq!(binding.payment_address.0.to_checksum(None), address);
         assert!(invoice.address_matches_parameters());
         assert_eq!(
             binding.salt,
             gum_core::recompute_salt(
+                invoice.issuance_nonce,
                 invoice.attribution_hash,
-                binding.attestation.digest.parse().unwrap()
+                Some(evidence.attestation.digest.parse().unwrap())
             )
         );
         let events: Vec<String> =
@@ -2915,12 +2976,13 @@ mod tests {
         assert_eq!(verification["attempts"][0]["kind"], "wallet");
         assert_eq!(verification["attempts"][0]["status"], "approved");
 
-        // A gated request takes the wallet step only from a session that
-        // has satisfied its policy.
+        // A request that attached no wallet-attestation add-on has no wallet
+        // step at all: the challenge is refused even for a gated request,
+        // whose payer names no wallet until it pays from one.
         let (gated_id, _) = create_gated(
             &app,
             "bind-gated",
-            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            json!({"email": {"expected_email": "alice@example.com"}}),
             "Gated",
         )
         .await;
@@ -2933,10 +2995,10 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(no_session.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(no_session.status(), StatusCode::CONFLICT);
         assert_eq!(
             json_body(no_session).await["error"]["code"],
-            "payer_session_invalid"
+            "wallet_attestation_not_required"
         );
     }
 
@@ -4246,7 +4308,7 @@ mod tests {
         let created = json_body(created).await;
         let id = created["id"].as_str().unwrap().to_owned();
         let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
-        let (bound, _) = bind_wallet(&app, &id, None, &PAYER_KEY).await;
+        let (bound, _) = choose_network(&app, &id).await;
         let address = Address::parse_checksummed(bound["address"].as_str().unwrap(), None).unwrap();
         let payer_wallet = gum_core::wallet_of(&PAYER_KEY);
         let proof_request =
@@ -4287,8 +4349,9 @@ mod tests {
         .await
         .unwrap();
 
-        // Money from a stranger's wallet was credited and settled, but it is
-        // not the attested wallet paying, so no proof claims it was.
+        // Money from a stranger's wallet counts all the same here: a
+        // permissionless request accepts any deposit, so the proof covers
+        // both transfers and claims no wallet.
         sqlx::query(
             r#"INSERT INTO payment_observations
                  (chain_id, token_address, block_number, block_hash, block_timestamp,
@@ -4305,50 +4368,26 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let mismatch = app.clone().oneshot(proof_request(KEY)).await.unwrap();
-        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            json_body(mismatch).await["error"]["code"],
-            "deposit_sender_mismatch"
-        );
-        sqlx::query("DELETE FROM payment_observations WHERE transaction_hash = $1")
-            .bind([4u8; 32].as_slice())
-            .execute(&pool)
-            .await
-            .unwrap();
 
         let served = app.clone().oneshot(proof_request(KEY)).await.unwrap();
         assert_eq!(served.status(), StatusCode::OK);
         let proof: ProofOfPayment = serde_json::from_value(json_body(served).await).unwrap();
         assert_eq!(proof.payment_id, id);
         assert_eq!(proof.payment_address, address.to_checksum(None));
+        assert_eq!(proof.scope, gum_core::ProofScope::Settlement);
         assert_eq!(proof.verification.payload.result, "not_required");
-        assert_eq!(
-            proof.verification.payload.payer_policy_mode,
-            "permissionless"
-        );
         assert!(proof.verification.payload.verified_at.is_none());
-        assert_eq!(
-            proof.verification.payload.payer_wallet,
-            payer_wallet.to_checksum(None)
-        );
-        assert_eq!(proof.payer_wallet.address, payer_wallet.to_checksum(None));
-        assert_eq!(proof.recovery_address, payer_wallet.to_checksum(None));
-        assert_eq!(
-            proof
-                .verification
-                .payload
-                .facts
-                .iter()
-                .map(|fact| fact.kind.as_str())
-                .collect::<Vec<_>>(),
-            ["wallet"]
-        );
+        assert!(proof.verification.payload.payer_wallet.is_none());
+        assert!(proof.verification.payload.wallet_nonce.is_none());
+        assert!(proof.verification.payload.wallet_bound_at.is_none());
+        assert!(proof.payer_wallet.is_none());
+        assert_eq!(proof.recovery_address, RECOVERY_ADDRESS.to_checksum(None));
+        assert!(proof.verification.payload.facts.is_empty());
         assert_eq!(
             proof.verification.signer,
             attestor().address().to_checksum(None)
         );
-        assert_eq!(proof.transfers.len(), 1);
+        assert_eq!(proof.transfers.len(), 2);
         assert_eq!(proof.transfers[0].amount_base_units, "1000000");
         // The proof names the fulfilment transaction recorded on the row;
         // the transfers are what paid the address.
@@ -4364,7 +4403,7 @@ mod tests {
         let verified = verify_proof(&proof, None, &[attestor().address()])
             .unwrap_or_else(|error| panic!("the served proof must verify offline: {error}"));
         assert_eq!(verified.payment_address, address);
-        assert_eq!(verified.payer_wallet, payer_wallet);
+        assert_eq!(verified.payer_wallet, None);
         assert_eq!(verified.attestation_signer, attestor().address());
 
         let mut tampered = proof.clone();
@@ -4399,14 +4438,14 @@ mod tests {
         let (email_id, email_created) = create_gated(
             &app,
             "gated-email",
-            json!({"mode": "verified_email", "expected_email": "Alice@Example.com"}),
+            json!({"email": {"expected_email": "Alice@Example.com"}}),
             "Email retainer",
         )
         .await;
         let (other_id, _) = create_gated(
             &app,
             "gated-other",
-            json!({"mode": "verified_email", "expected_email": "bob@example.com"}),
+            json!({"email": {"expected_email": "bob@example.com"}}),
             "Other retainer",
         )
         .await;
@@ -4426,10 +4465,7 @@ mod tests {
         let pending = json_body(pending).await;
         assert_eq!(pending["content_unlocked"], false);
         assert_eq!(pending["requirements"]["email"], "pending");
-        assert_eq!(
-            pending["payer_policy"]["expected_email_hint"],
-            "a****@e***.com"
-        );
+        assert_eq!(pending["expected_email_hint"], "a****@e***.com");
         assert!(pending["amount"].is_null());
         assert!(!pending.to_string().contains("alice@example.com"));
 
@@ -4559,15 +4595,15 @@ mod tests {
         assert_eq!(unlocked["amount"], "1.000000");
         assert_eq!(unlocked["details"]["payer"]["name"], "Globex");
         assert_eq!(unlocked["details"]["reference"], "INV-9");
-        // Unlocked is not yet payable: the address waits for the wallet
-        // step, which this verified session may now take.
+        // Unlocked is not yet payable: the address waits for the network
+        // choice, which this verified session may now make.
         assert!(email_created["address"].is_null());
         assert!(unlocked["address"].is_null());
         assert!(unlocked["deposit_uri"].is_null());
-        assert_eq!(unlocked["requirements"]["wallet"], "pending");
-        let (bound, _) = bind_wallet(&app, &email_id, Some(&session), &PAYER_KEY).await;
+        assert_eq!(unlocked["requirements"]["wallet"], "not_required");
+        let (bound, _) = choose_network_as(&app, &email_id, Some(&session), "1").await;
         assert!(bound["address"].as_str().unwrap().starts_with("0x"));
-        assert_eq!(bound["requirements"]["wallet"], "approved");
+        assert_eq!(bound["requirements"]["wallet"], "not_required");
         assert!(
             bound["deposit_uri"]
                 .as_str()
@@ -4593,6 +4629,8 @@ mod tests {
             .unwrap();
         let bare = json_body(bare).await;
         assert_eq!(bare["content_unlocked"], false);
+        // Without a session every attached add-on still reads pending, so
+        // the checkout offers its controls rather than a bare lock.
         assert_eq!(bare["requirements"]["email"], "pending");
         assert!(bare["address"].is_null());
         let stale = app
@@ -4733,24 +4771,25 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(activity["payer_policy_mode"], "verified_email");
+        assert_eq!(
+            activity["verification"]["email"]["expected_email"],
+            "alice@example.com"
+        );
         assert!(activity["verification_completed_at"].is_string());
         assert_eq!(activity["facts"]["email"], "approved");
         assert_eq!(activity["facts"]["complete"], true);
         let attempts = activity["attempts"].as_array().unwrap();
-        assert!(attempts.len() >= 3, "{activity}");
-        assert!(
-            attempts
-                .iter()
-                .all(|attempt| attempt["kind"] == "email" || attempt["kind"] == "wallet")
-        );
-        assert_eq!(activity["facts"]["wallet"], "approved");
+        assert!(attempts.len() >= 2, "{activity}");
+        assert!(attempts.iter().all(|attempt| attempt["kind"] == "email"));
+        assert_eq!(activity["facts"]["wallet"], "not_required");
         assert!(
             attempts.iter().any(
                 |attempt| attempt["status"] == "approved" && attempt["verified_at"].is_string()
             )
         );
-        assert!(!activity.to_string().contains("alice@example.com"));
+        // The expected mailbox is the merchant's own assertion, mirrored
+        // back verbatim; what never appears is anything about the sessions
+        // behind the attempts.
         assert!(!activity.to_string().contains("payer_session"));
     }
 
@@ -4797,7 +4836,7 @@ mod tests {
         let (expired_id, _) = create_gated(
             &app,
             "expired",
-            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            json!({"email": {"expected_email": "alice@example.com"}}),
             "Too late",
         )
         .await;
@@ -4833,7 +4872,7 @@ mod tests {
         let (gated_id, _) = create_gated(
             &app,
             "outage",
-            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            json!({"email": {"expected_email": "alice@example.com"}}),
             "Outage",
         )
         .await;
@@ -4886,8 +4925,7 @@ mod tests {
         body["heading"] = json!("Deposit 1 USDC");
         body["reference"] = json!("dep-8042");
         body["metadata"] = json!({"order": "8042"});
-        body["payer_policy"] =
-            json!({"mode": "merchant_session", "payer_reference": payer_reference});
+        body["verification"] = json!({"merchant_auth": {"payer_reference": payer_reference}});
         body
     }
 
@@ -4939,9 +4977,11 @@ mod tests {
         assert!(secret.starts_with("cs_"), "{secret}");
         assert_eq!(secret.len(), 46);
         assert!(created["client_secret_expires_at"].is_string());
-        assert_eq!(created["payer_policy"]["mode"], "merchant_session");
-        assert_eq!(created["payer_policy"]["payer_reference"], "user_123");
-        assert!(created["payer_policy"].get("expected_email").is_none());
+        assert_eq!(
+            created["verification"]["merchant_auth"]["payer_reference"],
+            "user_123"
+        );
+        assert!(created["verification"].get("email").is_none());
         assert!(created["verification_completed_at"].is_null());
         assert_eq!(
             created["deposit_url"],
@@ -4985,7 +5025,10 @@ mod tests {
         )
         .await;
         assert!(fetched.get("client_secret").is_none());
-        assert_eq!(fetched["payer_policy"]["payer_reference"], "user_123");
+        assert_eq!(
+            fetched["verification"]["merchant_auth"]["payer_reference"],
+            "user_123"
+        );
         let stored: Vec<Vec<u8>> = sqlx::query_scalar(
             "SELECT secret_hash FROM payer_client_secrets WHERE invoice_id = $1",
         )
@@ -4999,8 +5042,10 @@ mod tests {
         //    app must open it, and learns nothing about the payer.
         let bare = payer_read(&app, &id, None).await;
         assert_eq!(bare["content_unlocked"], false);
-        assert_eq!(bare["payer_policy"]["mode"], "merchant_session");
-        assert!(bare["payer_policy"]["expected_email_hint"].is_null());
+        // The payer's view names no add-on payloads: it shows the gate and
+        // the masked hint, never the merchant's own reference.
+        assert!(bare.get("verification").is_none());
+        assert!(bare["expected_email_hint"].is_null());
         assert_eq!(bare["requirements"]["merchant_session"], "pending");
         assert_eq!(bare["requirements"]["email"], "not_required");
         assert_eq!(bare["requirements"]["complete"], false);
@@ -5015,7 +5060,7 @@ mod tests {
         let (other_id, other_created) = create_gated(
             &app,
             "ms-other",
-            json!({"mode": "merchant_session", "payer_reference": "user_999"}),
+            json!({"merchant_auth": {"payer_reference": "user_999"}}),
             "Other deposit",
         )
         .await;
@@ -5092,15 +5137,15 @@ mod tests {
         assert_eq!(unlocked["amount"], "1.000000");
         assert_eq!(unlocked["details"]["reference"], "dep-8042");
         assert_eq!(unlocked["requirements"]["complete"], true);
-        // Unlocked is not yet payable: the address waits for the wallet
-        // step, which this verified session may now take.
+        // Unlocked is not yet payable: the address waits for the network
+        // choice, which this verified session may now make.
         assert!(created["address"].is_null());
         assert!(unlocked["address"].is_null());
         assert!(unlocked["deposit_uri"].is_null());
-        assert_eq!(unlocked["requirements"]["wallet"], "pending");
-        let (bound, _) = bind_wallet(&app, &id, Some(&session), &PAYER_KEY).await;
+        assert_eq!(unlocked["requirements"]["wallet"], "not_required");
+        let (bound, _) = choose_network_as(&app, &id, Some(&session), "1").await;
         assert!(bound["address"].as_str().unwrap().starts_with("0x"));
-        assert_eq!(bound["requirements"]["wallet"], "approved");
+        assert_eq!(bound["requirements"]["wallet"], "not_required");
         assert!(
             bound["deposit_uri"]
                 .as_str()
@@ -5118,6 +5163,10 @@ mod tests {
         assert_eq!(qr.status(), StatusCode::OK);
         let still_bare = payer_read(&app, &id, None).await;
         assert_eq!(still_bare["content_unlocked"], false);
+        // The bare link stays locked even though the facts read invoice-level
+        // now: content belongs to the session that proved them. Without a
+        // session the requirements read pending, so the checkout offers the
+        // way back in (open from the merchant's app) instead of a bare lock.
         assert_eq!(still_bare["requirements"]["merchant_session"], "pending");
         let stranger = payer_read(&app, &other_id, Some(&session)).await;
         assert_eq!(stranger["content_unlocked"], false);
@@ -5164,11 +5213,7 @@ mod tests {
             format!("dr_{uuid}")
         );
         assert_eq!(
-            approved["data"]["deposit_request"]["payer_policy_mode"],
-            "merchant_session"
-        );
-        assert_eq!(
-            approved["data"]["deposit_request"]["payer_reference"],
+            approved["data"]["deposit_request"]["verification"]["merchant_auth"]["payer_reference"],
             "user_123"
         );
         assert_eq!(approved["data"]["deposit_request"]["reference"], "dep-8042");
@@ -5192,18 +5237,19 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(activity["payer_policy_mode"], "merchant_session");
+        assert_eq!(
+            activity["verification"]["merchant_auth"]["payer_reference"],
+            "user_123"
+        );
         assert_eq!(activity["facts"]["merchant_session"], "approved");
         assert_eq!(activity["facts"]["email"], "not_required");
         assert_eq!(activity["facts"]["complete"], true);
-        assert_eq!(activity["facts"]["wallet"], "approved");
+        assert_eq!(activity["facts"]["wallet"], "not_required");
         let attempts = activity["attempts"].as_array().unwrap();
-        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts.len(), 1, "the network choice is not an attempt");
         assert_eq!(attempts[0]["kind"], "merchant_session");
         assert_eq!(attempts[0]["status"], "approved");
         assert!(attempts[0]["verified_at"].is_string());
-        assert_eq!(attempts[1]["kind"], "wallet");
-        assert_eq!(attempts[1]["status"], "approved");
         assert!(!activity.to_string().contains("cs_"));
         assert!(!activity.to_string().contains("payer_session"));
 
@@ -5292,7 +5338,7 @@ mod tests {
         let (email_id, _) = create_gated(
             &app,
             "ms-email",
-            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            json!({"email": {"expected_email": "alice@example.com"}}),
             "Email retainer",
         )
         .await;
@@ -5385,8 +5431,10 @@ mod tests {
         );
         for (kind, payload) in &events {
             let payment = &payload["data"]["deposit_request"];
-            assert_eq!(payment["payer_reference"], "user_123", "{kind}");
-            assert_eq!(payment["payer_policy_mode"], "merchant_session", "{kind}");
+            assert_eq!(
+                payment["verification"]["merchant_auth"]["payer_reference"], "user_123",
+                "{kind}"
+            );
             assert_eq!(payment["metadata"]["order"], "8042", "{kind}");
             assert!(payment["verification_completed_at"].is_string(), "{kind}");
             assert!(payment["likely_unsolicited_at"].is_null(), "{kind}");
@@ -5429,16 +5477,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            proof.verification.payload.payer_policy_mode,
-            "merchant_session"
+            proof.verification.payload.scope,
+            gum_core::ProofScope::Settlement
         );
         assert_eq!(proof.verification.payload.result, "approved");
         assert!(proof.verification.payload.verified_at.is_some());
         assert_eq!(
-            proof.canonical_issuance_snapshot.payer_policy,
-            gum_core::PayerPolicy::MerchantSession {
-                payer_reference: "user_123".into()
-            }
+            proof
+                .canonical_issuance_snapshot
+                .payer_verification
+                .merchant_auth
+                .as_ref()
+                .unwrap()
+                .payer_reference,
+            "user_123"
         );
         let verified = verify_proof(&proof, None, &[attestor().address()])
             .unwrap_or_else(|error| panic!("the served proof must verify offline: {error}"));
@@ -5493,42 +5545,32 @@ mod tests {
         let (app, tenant) = app_with_payer_verification(pool.clone()).await;
 
         // The assertion is required, bounded, and one token. A body that does
-        // not fit the policy's shape and one that fails its rules answer the
+        // not fit the add-on's shape and one that fails its rules answer the
         // same way: 400 invalid_request.
-        for (name, policy, status) in [
+        for (name, verification, status) in [
             (
                 "missing reference",
-                json!({"mode": "merchant_session"}),
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                "email on merchant session",
-                json!({"mode": "merchant_session", "payer_reference": "u1", "expected_email": "a@b.co"}),
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                "reference on permissionless",
-                json!({"mode": "permissionless", "payer_reference": "u1"}),
+                json!({"merchant_auth": {}}),
                 StatusCode::BAD_REQUEST,
             ),
             (
                 "blank reference",
-                json!({"mode": "merchant_session", "payer_reference": "   "}),
+                json!({"merchant_auth": {"payer_reference": "   "}}),
                 StatusCode::BAD_REQUEST,
             ),
             (
                 "spaced reference",
-                json!({"mode": "merchant_session", "payer_reference": "user 123"}),
+                json!({"merchant_auth": {"payer_reference": "user 123"}}),
                 StatusCode::BAD_REQUEST,
             ),
             (
                 "long reference",
-                json!({"mode": "merchant_session", "payer_reference": "x".repeat(129)}),
+                json!({"merchant_auth": {"payer_reference": "x".repeat(129)}}),
                 StatusCode::BAD_REQUEST,
             ),
         ] {
             let mut body = valid_body();
-            body["payer_policy"] = policy;
+            body["verification"] = verification;
             let response = app
                 .clone()
                 .oneshot(create_request(KEY, name, &body))
@@ -5538,8 +5580,7 @@ mod tests {
         }
         // Trimmed, case kept.
         let mut body = valid_body();
-        body["payer_policy"] =
-            json!({"mode": "merchant_session", "payer_reference": "  User_ABC "});
+        body["verification"] = json!({"merchant_auth": {"payer_reference": "  User_ABC "}});
         let created = json_body(
             app.clone()
                 .oneshot(create_request(KEY, "trimmed", &body))
@@ -5547,7 +5588,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(created["payer_policy"]["payer_reference"], "User_ABC");
+        assert_eq!(
+            created["verification"]["merchant_auth"]["payer_reference"],
+            "User_ABC"
+        );
         let id = created["id"].as_str().unwrap().to_owned();
         let uuid = Uuid::parse_str(id.strip_prefix("dr_").unwrap()).unwrap();
         let secret = created["client_secret"].as_str().unwrap().to_owned();
@@ -5875,7 +5919,7 @@ mod tests {
         let (id, _) = create_gated(
             &app,
             "preview-email",
-            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            json!({"email": {"expected_email": "alice@example.com"}}),
             "Preview retainer",
         )
         .await;
@@ -5921,7 +5965,7 @@ mod tests {
         let (id, _) = create_gated(
             &app,
             "preview-owner",
-            json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
+            json!({"email": {"expected_email": "alice@example.com"}}),
             "Owner retainer",
         )
         .await;
@@ -6177,7 +6221,7 @@ mod tests {
                 "payer": {"name": "Globex"},
                 "payout_address": "0x0000000000000000000000000000000000000002",
                 "issuer_id": issuer_id,
-                "payer_policy": {"mode": "permissionless"}
+                "verification": {"wallet_attestation": false}
             })
         };
         for (name, issuer_id) in [
@@ -6274,7 +6318,7 @@ mod tests {
             "payer": {"name": "Globex"},
             "payout_address": "0x0000000000000000000000000000000000000002",
             "issuer_id": "shared-correlation-id",
-            "payer_policy": {"mode": "permissionless"}
+            "verification": {"wallet_attestation": false}
         });
         let issued = json_body(
             app.clone()
@@ -6323,7 +6367,7 @@ mod tests {
             "payer": {"name": "Globex"},
             "payout_address": "0x0000000000000000000000000000000000000002",
             "issuer_id": "order-42",
-            "payer_policy": {"mode": "permissionless"}
+            "verification": {"wallet_attestation": false}
         });
         let first = json_body(
             app.clone()
@@ -6367,7 +6411,7 @@ mod tests {
             .oneshot(create_request(
                 KEY,
                 "bare",
-                &json!({"amount": "1", "payer_policy": {"mode": "permissionless"}}),
+                &json!({"amount": "1", "verification": {"wallet_attestation": false}}),
             ))
             .await
             .unwrap();
@@ -6385,7 +6429,7 @@ mod tests {
                 KEY,
                 "no-issuer",
                 &json!({"amount": "1", "payout_address": "0x0000000000000000000000000000000000000002",
-                        "payer_policy": {"mode": "permissionless"}}),
+                        "verification": {"wallet_attestation": false}}),
             ))
             .await
             .unwrap();
@@ -6425,14 +6469,16 @@ mod tests {
                         "issuer": {"name": "Acme"},
                         "payout_address": "0x0000000000000000000000000000000000000002",
                         "customer_id": customer["id"],
-                        "payer_policy": {"mode": "permissionless"}
+                        "verification": {"wallet_attestation": false}
                     }),
                 ))
                 .await
                 .unwrap(),
         )
         .await;
+
         assert_eq!(issued["customer_id"], customer["id"]);
+
         assert_eq!(
             issued["payer"],
             json!({"name": "Globex", "email": "ap@globex.example", "details": "Net 30"})
@@ -6944,7 +6990,7 @@ mod tests {
         assert_eq!(created["token"]["symbol"], "USDT");
         assert_eq!(created["token"]["address"], TEST_USDT.to_checksum(None));
         assert_eq!(created["token"]["decimals"], 6);
-        assert_eq!(created["attribution"]["version"], 4);
+        assert_eq!(created["attribution"]["version"], 5);
         let id = created["id"].as_str().unwrap().to_owned();
 
         // The list summary and the payer view carry the currency too.

@@ -81,8 +81,8 @@ export default function ConceptsPage() {
           Your wallet. By default the wallet Gum created for your account at sign-in; any EVM
           address you save works too.
         </Def>
-        <Def term="payer_policy">
-          Who may pay and what they prove first. See{" "}
+        <Def term="verification">
+          Optional add-ons naming who may pay and what they prove first. See{" "}
           <Link href="/docs/payer-verification">Verifying the payer</Link>.
         </Def>
         <Def term="expires_at">

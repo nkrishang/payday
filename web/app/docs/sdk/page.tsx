@@ -26,7 +26,6 @@ const request = await gum.depositRequests.create(
     payer: { name: "Customer Inc", details: "12 Main St, Springfield" },
     heading: "March retainer",
     reference: "INV-1042",
-    payer_policy: { mode: "permissionless" },
     expires_in: 3600,
   },
   crypto.randomUUID(), // the idempotency key is required

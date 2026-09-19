@@ -8,7 +8,7 @@
 # chain id); the image tag is set by the deploy workflow from the commit it
 # deploys.
 
-name           = "payday-staging"
+name           = "gum-staging"
 api_key_prefix = "gum_test_"
 aws_region     = "eu-north-1"
 domain_name    = "api.staging.gum.money"
@@ -128,7 +128,7 @@ db_deletion_protection = false
 db_skip_final_snapshot = true
 
 # main deploys here automatically after CI passes.
-github_repository = "nkrishang/payday"
+github_repository = "nkrishang/gum"
 
 # Two sweep signers, enough to exercise the pool with little gas to fund.
 sweep_signer_count = 2

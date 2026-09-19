@@ -93,7 +93,8 @@ function of `(status, confirmed_received, attention_reason)` computed by
 Funds after the terminal statuses are normal, not exceptional: a late
 transfer to a settled or expired address is observed by the indexer, bumps
 `uncollected_count`, and the same scheduler sweeps it again (the helper
-contract routes it to the payer's recovery wallet). `SWEEPABLE_STATUSES`
+contract routes it to the deposit address's recovery term, Gum's dedicated
+KMS recovery wallet). `SWEEPABLE_STATUSES`
 is therefore `funded | expired | fulfilled | recovered`; only `created` is
 excluded, because a partial balance cannot be settled before expiry.
 

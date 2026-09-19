@@ -24,8 +24,8 @@ Create `backend.hcl` (ignored by Git) for an encrypted S3 state key separate
 from the AWS stack, then initialize:
 
 ```hcl
-bucket       = "company-payday-terraform-state"
-key          = "production/payday-auth0.tfstate"
+bucket       = "company-gum-terraform-state"
+key          = "production/gum-auth0.tfstate"
 region       = "us-east-1"
 encrypt      = true
 use_lockfile = true
@@ -42,7 +42,7 @@ accepts any UUID because its Management API object has no ID.
 
 ```bash
 terraform -chdir=auth0 import auth0_connection.passwordless_email 'con_REPLACE_ME'
-terraform -chdir=auth0 import auth0_attack_protection.payday \
+terraform -chdir=auth0 import auth0_attack_protection.gum \
   '24940d4b-4bd4-44e7-894e-f92e4de36a40'
 terraform -chdir=auth0 plan -out=auth0.tfplan
 terraform -chdir=auth0 apply auth0.tfplan

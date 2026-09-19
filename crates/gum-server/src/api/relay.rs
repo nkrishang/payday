@@ -22,7 +22,7 @@
 
 use std::str::FromStr;
 
-use alloy_primitives::{B256, U256, hex};
+use alloy_primitives::{Address, B256, U256, hex};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use chrono::{Duration, Utc};
@@ -47,6 +47,18 @@ use crate::state::AppState;
 /// minute or so; the page re-quotes when it is about to send an old one.
 pub const QUOTE_VALIDITY: Duration = Duration::minutes(15);
 
+/// The payer's origin wallet: a 20-byte EVM address, never the zero one.
+fn payer_wallet_value(value: &str) -> Result<Address, ApiError> {
+    let wallet = Address::from_str(value.trim())
+        .map_err(|_| ApiError::invalid_request("payer_wallet must be a 20-byte EVM address"))?;
+    if wallet.is_zero() {
+        return Err(ApiError::invalid_request(
+            "payer_wallet must not be the zero address",
+        ));
+    }
+    Ok(wallet)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuoteBody {
@@ -56,6 +68,12 @@ pub struct QuoteBody {
     /// `tokens`. Absent, the chain's USDC.
     #[serde(default)]
     pub origin_token: Option<String>,
+    /// The wallet that will send the origin transactions: the payer's own,
+    /// connected one. Relay builds its steps for it; the intent records it
+    /// so only that wallet's report of the send is accepted. Relay is
+    /// offered only on requests without the wallet-attestation add-on, so
+    /// this wallet is a fact about the payment, not a verified identity.
+    pub payer_wallet: String,
 }
 
 #[derive(Deserialize)]
@@ -197,9 +215,15 @@ pub async fn quote(
 ) -> Result<Json<RelayQuoteResponse>, ApiError> {
     let relay = state.relay()?;
     let (request, remaining) = payable(&state, &id, &headers).await?;
+    // Relay is offered only where no wallet was attested: an attested
+    // request's deposit must come from the attested wallet itself.
+    if request.invoice().wallet_attestation_required() {
+        return Err(ApiError::wallet_attestation_required());
+    }
     let origin_chain_id: u64 = body.origin_chain_id.trim().parse().map_err(|_| {
         ApiError::invalid_request("origin_chain_id must be a decimal chain id string")
     })?;
+    let payer_wallet = payer_wallet_value(&body.payer_wallet)?;
     let binding = request.binding();
     let destination = binding.network;
     if origin_chain_id == destination.chain_id.0 {
@@ -234,7 +258,7 @@ pub async fn quote(
     let quote = relay
         .api()
         .quote(&QuoteRequest {
-            user: binding.payer_wallet,
+            user: payer_wallet,
             recipient: binding.payment_address.0,
             origin_chain_id,
             destination_chain_id: destination.chain_id.0,
@@ -245,8 +269,8 @@ pub async fn quote(
         .await
         .map_err(relay_error)?;
     // The quote must be exactly what was asked: the amount due lands, and
-    // every step is a transaction the attested wallet sends on the origin
-    // chain. Anything else is a route we do not offer.
+    // every step is a transaction on the origin chain. Anything else is a
+    // route we do not offer.
     if quote.amount_out != remaining {
         return Err(ApiError::relay_quote_failed(
             "Relay did not quote the exact amount due",
@@ -261,9 +285,9 @@ pub async fn quote(
             )));
         }
         for transaction in &step.transactions {
-            if transaction.chain_id != origin_chain_id || transaction.from != binding.payer_wallet {
+            if transaction.chain_id != origin_chain_id {
                 return Err(ApiError::relay_quote_failed(
-                    "Relay's route is not from the attested wallet on the chosen chain",
+                    "Relay's route leaves the chosen origin chain",
                 ));
             }
             steps.push(RelayQuoteStepDto {
@@ -294,7 +318,7 @@ pub async fn quote(
             origin_chain_id,
             destination_chain_id: destination.chain_id.0,
             origin_currency: origin_usdc,
-            payer_wallet: binding.payer_wallet,
+            payer_wallet,
             quoted_in_amount: quote.amount_in,
             quoted_out_amount: quote.amount_out,
             expires_at,
@@ -339,12 +363,23 @@ pub async fn sent(
     let intent_id = RelayIntentId::parse(&intent).ok_or_else(ApiError::relay_intent_not_found)?;
     let transaction_hash = B256::from_str(body.transaction_hash.trim())
         .map_err(|_| ApiError::invalid_request("transaction_hash must be a 32-byte hex hash"))?;
+    // Only the wallet the quote was made for may report its send; the
+    // intent's own record says which one that was.
+    let intent_row = state
+        .relay_intents
+        .find(intent_id.0)
+        .await?
+        .filter(|row| row.invoice_id == request.invoice().id.0)
+        .ok_or_else(ApiError::relay_intent_not_found)?;
+    let intent_wallet = intent_row
+        .payer_wallet()
+        .ok_or_else(|| ApiError::internal("relay intent has an invalid payer wallet"))?;
     match state
         .relay_intents
         .mark_sent(
             intent_id.0,
             request.invoice().id.0,
-            request.binding().payer_wallet,
+            intent_wallet,
             transaction_hash,
         )
         .await?

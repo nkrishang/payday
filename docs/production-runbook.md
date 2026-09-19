@@ -14,11 +14,13 @@ database accordingly: the schema ships as one baseline migration and there
 is no upgrade path from any earlier pre-release database. Every existing
 environment is recreated empty (§7).
 
-One thing Gum holds and two it never does: the sweep signer holds only
-gas (MON on Monad, ETH on Base and Arbitrum One); the requested amount moves directly from the deposit address to the
-merchant; and overpayment remainders, expired balances, and late transfers
-go back on-chain to the payer's own attested wallet, which is every deposit
-address's recovery term. Gum custodies no stablecoin.
+What Gum holds and what it never does: the sweep signer holds only gas
+(MON on Monad, ETH on Base and Arbitrum One) and the dedicated KMS recovery
+wallet is the recovery custody every deposit address commits to — recovered
+funds land there and Gum returns them to the payer manually, after review;
+the requested amount moves directly from the deposit address to the
+merchant. Gum custodies no intended deposit amount, but it does hold
+recovered funds until the manual return is done.
 
 ## What runs where
 
@@ -31,7 +33,7 @@ address's recovery term. Gum custodies no stablecoin.
 | Database (domain tables, `bus.*`, `execution.*`) | RDS PostgreSQL, private subnets, TLS to the pinned RDS CA; reachable from `api` and `signers` only | none | `crates/gum-schema/migrations` |
 | Schema migrations | ECS task definition `migrate` (the `api` image running `gum-server migrate`), run once per deploy by `scripts/run-migrate-task.sh` before the services roll | none | `crates/gum-schema` |
 | Deposit request attachments (PDF) | S3 bucket `gum-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
-| Signing keys | KMS secp256k1 keys: sweep signer, attestation signer; a symmetric key for attachments; a legacy recovery key pending removal | none | `infra/` |
+| Signing keys | KMS secp256k1 keys: sweep signer pool, attestation signer, and the dedicated recovery wallet that backs `GUM_RECOVERY_ADDRESS`; a symmetric key for attachments | none | `infra/` |
 | Merchant notification email | SES identity for `gum.money` | `alerts@gum.money` | `infra/` |
 | Payer deposit request email | Resend, with the API's own key (`resend_api_key`) | `contact@gum.money` | `infra/` |
 | Merchant sign-in | Privy app (email code, embedded wallet, identity token) | | `docs/authentication.md` |
@@ -361,8 +363,8 @@ The outputs this runbook needs:
 
 The payer verification settings are optional to Terraform as a group: leave
 `payer_auth0_audience` and `payer_auth0_client_id` unset and the API still
-serves permissionless and merchant-session deposit requests, but gated
-requests and issuer-mailbox verification answer `503
+serves requests without identity add-ons and with merchant auth, but email
+verification and issuer-mailbox verification answer `503
 verification_unavailable`. Set both before launch.
 
 ## 4. Create protected Terraform state storage
@@ -528,7 +530,8 @@ Review the plan before applying it. In particular, reject unexplained database
 replacement or destruction, IAM permissions broader than the named secrets,
 the attachment bucket's `uploads/` prefix, and the named KMS keys (only the
 API task role may sign with the attestation key, only the **signers** task
-role with the sweep pool, and nothing with the legacy recovery key), a
+role with the sweep pool, and only the operator return procedure with the
+recovery key), a
 database secret attached to the indexer task, an indexer or signers count
 other than one, or plaintext or non-HTTPS endpoints.
 
@@ -546,12 +549,37 @@ connections verify the server certificate against the checksum-pinned AWS
 RDS CA bundle in the container. Confirm the SNS subscription link sent to
 the configured alert email; alarms do not deliver until it is confirmed.
 
-The stack still declares a `recovery` KMS key. It is legacy: before deposits
-returned excess funds to the payer's own wallet, it was every deposit
-request's recovery term. Nothing reads its address any more and no task role
-can sign with it. Keep it only until any balance it holds from that period
-has been returned by hand, then remove its `prevent_destroy` guard and the
-resource.
+The stack's `recovery` KMS key is the dedicated recovery wallet: its derived
+Ethereum address is the deployment's `GUM_RECOVERY_ADDRESS`, the recovery
+term committed into every deposit address. Overpayment remainders, expired
+balances, late transfers, and wrong-network or wrong-token recoveries land
+there on-chain. No service task role can sign with it — returning funds to
+the payer is a manual operator procedure, signed with this key after review
+(see "Reconciling recovered funds" in
+[stuck-deposit-request.md](runbooks/stuck-deposit-request.md) and
+[wrong-network-deposit.md](runbooks/wrong-network-deposit.md)). Derive and
+record its address the same way as the other keys:
+
+```bash
+export AWS_KMS_KEY_ID="$(terraform -chdir=infra output -raw recovery_kms_key_arn)"
+cast wallet address --aws   # this is GUM_RECOVERY_ADDRESS
+```
+
+Treat the key as custody: it holds recovered funds until they are returned,
+so its balance is a monitoring signal, and the manual return steps should
+never sweep it empty of gas — fund it with a little native gas per chain as
+you do the sweep pool.
+
+### Recovery custody and manual returns
+
+Every recovery into custody is recorded in the `recovered_funds` ledger and
+reported by a `deposit_request.recovered_funds` webhook. Returning the funds
+to the payer is never automatic: an operator reviews the case (who paid, which
+address or wallet is theirs), agrees the destination, and sends from the
+recovery key with `cast` or any wallet holding the key, recording the return
+against the deposit request. Until that review completes, Gum is the
+custodian of the recovered amount; say so plainly in support conversations
+rather than promising an automatic on-chain return.
 
 ## 8. Verify and fund the KMS signers
 
@@ -723,15 +751,16 @@ curl --fail -sS "https://api.gum.money/v1/deposit-requests" \
   -H "Idempotency-Key: launch-check-$(date +%s)" \
   -d '{"amount":"0.01","payout_address":"<YOUR_PAYOUT_ADDRESS>",
        "issuer":{"name":"Gum"},"payer":{"name":"Launch check"},
-       "payer_policy":{"mode":"permissionless"},"expires_in":3600}' | jq
+       "verification":{"wallet_attestation":true},"expires_in":3600}' | jq
 ```
 
-The response's `chain`, `token`, and `address` are null until a wallet is
-bound, and `networks` lists the three chains. Open the returned
+The response's `chain`, `token`, and `address` are null until the wallet is
+attested, and `networks` lists the three chains. Open the returned
 `deposit_url` (on `gum.money`) in a browser, choose a network, connect the
 wallet you will pay from (the page switches it to that chain), and sign the
 attestation; `GET /v1/deposit-requests/{id}` then carries `chain`, `token`,
-`address`, `payer_wallet`, and `recovery_address` (the same wallet), and a
+`address`, and `payer_wallet` (the attested wallet), and `recovery_address`
+names Gum's recovery custody. A
 `deposit_request.ready` webhook fires. Pay exactly 0.01 native USDC to that
 address from that wallet on that chain. Repeat once per network, and once
 more with `"currency":"USDT","chain_id":"143"` (and `42161`) paid in USDT0,
@@ -744,10 +773,11 @@ before accepting real deposits. Confirm that:
    currency.
 3. `balanceOf(payment_address)` becomes zero.
 4. `cast call payment_address 'settled()(bool)'` returns `true`.
-5. A second, small deposit to the same address comes back to the paying
-   wallet within a minute while the status stays `settled`, and
+5. A second, small deposit to the same address is recovered into Gum's
+   recovery custody within a minute while the status stays `settled`, and
    `recovered_funds` records it with reason `late_transfer` (see the
-   [smoke test](runbooks/end-to-end-smoke-test.md)).
+   [smoke test](runbooks/end-to-end-smoke-test.md)). Return it to the payer
+   — yourself, here — with the manual procedure.
 6. API, indexer, and signers logs contain no repeated errors, and
    `/health/ready` on each answers 200.
 7. CloudWatch alarms and RDS backups are configured.
@@ -889,9 +919,10 @@ against production state.
   in [secrets-rotation.md](runbooks/secrets-rotation.md). The previous key
   has a 24-hour grace period; revoking invalidates current and grace-period
   keys immediately.
-- The `recovered_funds` ledger records every amount returned to a payer's
-  wallet; nothing is held, so there is nothing to return by hand. See
-  "Reconciling returned funds" in
+- The `recovered_funds` ledger records every amount recovered into Gum's
+  recovery custody; returning each one to the payer is the manual procedure in
+  "Recovery custody and manual returns" above. See
+  "Reconciling recovered funds" in
   [stuck-deposit-request.md](runbooks/stuck-deposit-request.md).
 - Attached PDFs stay in the versioned, KMS-encrypted attachment bucket for as
   long as their deposit request; the lifecycle rule removes only uploads that

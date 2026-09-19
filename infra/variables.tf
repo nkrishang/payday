@@ -1,7 +1,7 @@
 variable "name" {
   description = "Short name used to prefix resources."
   type        = string
-  default     = "payday"
+  default     = "gum"
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,20}$", var.name))
     error_message = "name must be 2-21 lowercase letters, digits, or hyphens, beginning with a letter."
@@ -91,6 +91,15 @@ variable "admin_reviewer_id" {
 variable "route53_zone_id" {
   description = "ID of the public Route53 hosted zone containing the API domain_name."
   type        = string
+}
+
+variable "recovery_address" {
+  description = "The Ethereum address of the dedicated recovery KMS key (aws_kms_key.recovery), derived out of band — KMS exposes no Ethereum address; see infra/README.md. Passed to the API as GUM_RECOVERY_ADDRESS: the recovery term committed into every deposit address."
+  type        = string
+  validation {
+    condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.recovery_address)) && lower(var.recovery_address) != "0x0000000000000000000000000000000000000000"
+    error_message = "recovery_address must be a nonzero 20-byte EVM address, derived from the recovery KMS key's public key (see infra/README.md)."
+  }
 }
 
 variable "image_tag" {

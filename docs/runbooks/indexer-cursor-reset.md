@@ -69,7 +69,7 @@ Replace `<TARGET_BLOCK>` with the numeric block number and
 
 ```bash
 # Wait a few seconds for the next poll tick, then check logs:
-aws logs tail /ecs/payday/indexer --since 2m --region "$AWS_REGION"
+aws logs tail /ecs/gum/indexer --since 2m --region "$AWS_REGION"
 ```
 
 If the chain was halted, resume it after repairing the cursor. Run this as a

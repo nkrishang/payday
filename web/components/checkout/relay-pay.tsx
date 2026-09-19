@@ -28,7 +28,7 @@ const RECEIPT_POLL_MS = 2_000;
  * not even be the request's currency: USDC on Base can pay a USDT request on
  * Monad, with Relay swapping on the way and the payer carrying the spread.
  * Gum quotes
- * the route (the quote is pinned to the attested wallet, the payment
+ * the route (the quote is pinned to the wallet that requests it, the payment
  * address, and exactly the amount still due), and this component sends the
  * quote's transactions from the connected wallet on the origin chain, then
  * reports the deposit so the indexer follows it.
@@ -37,8 +37,9 @@ const RECEIPT_POLL_MS = 2_000;
  * this app's wagmi configuration; the wallet is driven through its EIP-1193
  * provider directly: switch (or add, from the chain record Gum relays)
  * to the origin chain, send each step, wait for the receipt between steps.
- * The connected wallet must be the attested one: the quote was made for it,
- * and the origin transaction it sends is what the proof will name.
+ * The quote is made for the connected wallet (it is what will send the
+ * origin transactions, and the proof will name); with the wallet-attestation
+ * add-on attached it must also be the attested one.
  */
 export function RelayPay({
   payment,
@@ -68,8 +69,11 @@ export function RelayPay({
     paymentIdRef.current = payment.id;
   }, [origin, payment.id]);
   const following = payment.relay;
-  const walletMatches =
-    !isConnected || !address || address.toLowerCase() === payment.payer_wallet.toLowerCase();
+  // The attested wallet, when the wallet attestation add-on is attached and
+  // completed. Without the add-on any wallet may pay through Relay, and the
+  // connected wallet is never wrong.
+  const bound = payment.payer_wallet;
+  const walletMatches = !bound || !isConnected || !address || address.toLowerCase() === bound.toLowerCase();
 
   // The chains are read when the panel opens, once per page.
   useEffect(() => {
@@ -94,10 +98,17 @@ export function RelayPay({
       const [chainId, tokenAddress] = splitOrigin(originKey);
       const generation = ++quoteGeneration.current;
       const requestPaymentId = payment.id;
+      // The quote is made for the wallet that will send the origin
+      // transactions; there is nothing to quote before one is connected.
+      if (!address) {
+        setQuoting(false);
+        return null;
+      }
       setQuoting(true);
       setError(null);
       try {
         const fresh = await payerClient.relay.quote(payment.id, chainId, {
+          payerWallet: address,
           originToken: tokenAddress,
           ...(signal ? { signal } : {}),
           ...sessionOption(payerSession),
@@ -118,16 +129,17 @@ export function RelayPay({
         if (generation === quoteGeneration.current) setQuoting(false);
       }
     },
-    [payment.id, payerSession],
+    [payment.id, payerSession, address],
   );
 
-  // A new origin gets a quote at once, so the payer sees what it costs.
+  // A new origin gets a quote at once, so the payer sees what it costs —
+  // once a wallet is connected to send from.
   useEffect(() => {
-    if (!origin) return;
+    if (!origin || !address) return;
     const controller = new AbortController();
     void Promise.resolve().then(() => requestQuote(origin, controller.signal));
     return () => controller.abort();
-  }, [origin, requestQuote]);
+  }, [origin, address, requestQuote]);
 
   const pay = useCallback(async () => {
     if (executing.current) return;
@@ -308,6 +320,10 @@ export function RelayPay({
                 : ""}
               .
             </p>
+          ) : selected && !isConnected ? (
+            <p className="text-[13px] text-muted">
+              Connect the wallet you will pay from to get a quote on {selected.name}.
+            </p>
           ) : selected && quoting ? (
             <p className="text-[13px] text-muted">Getting a quote…</p>
           ) : null}
@@ -324,10 +340,10 @@ export function RelayPay({
                     : "Choose a network")}
           </Button>
 
-          {isConnected && !walletMatches ? (
+          {isConnected && !walletMatches && bound ? (
             <p role="alert" className="text-center text-[13px] text-warning">
               This request is bound to{" "}
-              <span className="font-mono">{truncateAddress(payment.payer_wallet)}</span>. Switch to
+              <span className="font-mono">{truncateAddress(bound)}</span>. Switch to
               that wallet: the route was quoted for it and only its payment counts.
             </p>
           ) : null}

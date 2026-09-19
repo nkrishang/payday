@@ -1,4 +1,4 @@
-import type { PayerPolicyMode, DepositRequestStatus } from "@gum/sdk";
+import type { PayerVerification, DepositRequestStatus } from "@gum/sdk";
 import type { CheckoutTone } from "@/lib/checkout-state";
 
 /** Merchant-facing words for the API's status values, in lifecycle order. */
@@ -21,15 +21,18 @@ export function statusTone(status: DepositRequestStatus): CheckoutTone {
   return STATUSES.find((entry) => entry.value === status)?.tone ?? "neutral";
 }
 
-/** Every mode's merchant-facing name. */
-const MODE_LABELS: Record<PayerPolicyMode, string> = {
-  permissionless: "Permissionless",
-  verified_email: "Verified email",
-  merchant_session: "Your app's sign-in",
-};
-
-export function modeLabel(mode: PayerPolicyMode): string {
-  return MODE_LABELS[mode] ?? mode;
+/**
+ * Merchant-facing words for a request's verification add-ons, read from the
+ * `verification` object every response carries. `merchant_auth` appears only
+ * when a request was composed through the API: it needs the merchant's
+ * application to sign the payer in and hand over the client secret.
+ */
+export function verificationLabel(verification: PayerVerification): string {
+  const parts: string[] = [];
+  if (verification.email) parts.push("Verified email");
+  if (verification.merchant_auth) parts.push("Your app's sign-in");
+  if (verification.wallet_attestation) parts.push("Wallet attestation");
+  return parts.length > 0 ? parts.join(" + ") : "None";
 }
 
 export function formatDate(iso: string): string {

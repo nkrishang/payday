@@ -76,9 +76,10 @@ BEGIN
      OR NEW.heading IS DISTINCT FROM OLD.heading
      OR NEW.memo IS DISTINCT FROM OLD.memo
      OR NEW.reference IS DISTINCT FROM OLD.reference
-     OR NEW.payer_policy_mode IS DISTINCT FROM OLD.payer_policy_mode
-     OR NEW.expected_email IS DISTINCT FROM OLD.expected_email
      OR NEW.payer_reference IS DISTINCT FROM OLD.payer_reference
+     OR NEW.expected_email IS DISTINCT FROM OLD.expected_email
+     OR NEW.wallet_attestation_required IS DISTINCT FROM OLD.wallet_attestation_required
+     OR NEW.issuance_nonce IS DISTINCT FROM OLD.issuance_nonce
      OR NEW.issuance_snapshot IS DISTINCT FROM OLD.issuance_snapshot
      OR NEW.attribution_version IS DISTINCT FROM OLD.attribution_version
      OR NEW.attribution_hash IS DISTINCT FROM OLD.attribution_hash
@@ -93,6 +94,7 @@ BEGIN
      OR NEW.recovery_address IS DISTINCT FROM OLD.recovery_address
      OR NEW.salt IS DISTINCT FROM OLD.salt
      OR NEW.payment_address IS DISTINCT FROM OLD.payment_address
+     OR NEW.ready_at IS DISTINCT FROM OLD.ready_at
      OR NEW.chain_id IS DISTINCT FROM OLD.chain_id
      OR NEW.factory_address IS DISTINCT FROM OLD.factory_address
      OR NEW.token_address IS DISTINCT FROM OLD.token_address
@@ -108,16 +110,17 @@ BEFORE UPDATE OF
     account_id, idempotency_key, customer_id, issuer_id, chain_id, factory_address,
     token_address, currency, token_decimals, beneficiary_address, expiration_timestamp,
     expires_in_secs, expiration_intent, recovery_address, amount, net_amount,
-    salt, payment_address, issuer, bill_to, notes, heading, memo, reference,
-    payer_policy_mode, expected_email, payer_reference, issuance_snapshot,
-    attribution_version, attribution_hash,
+    salt, payment_address, ready_at, issuer, bill_to, notes, heading, memo, reference,
+    expected_email, payer_reference, wallet_attestation_required, issuance_nonce,
+    issuance_snapshot, attribution_version, attribution_hash,
     payer_wallet, payer_attestation, wallet_bound_at
 ON invoices
 FOR EACH ROW EXECUTE FUNCTION reject_invoice_issuance_mutation();
 
 -- The webhook object now returns `issuer_id` exactly as stored: an existing
 -- `iss_<uuid>` value is already prefixed by the migration above, and a new
--- merchant-supplied value must not be transformed.
+-- merchant-supplied value must not be transformed. The verification object
+-- carries the add-ons the same way `0001` built them.
 CREATE OR REPLACE FUNCTION webhook_deposit_request_object(invoice invoices) RETURNS JSONB
 LANGUAGE SQL STABLE AS $$
     SELECT jsonb_build_object(
@@ -133,8 +136,12 @@ LANGUAGE SQL STABLE AS $$
         'metadata', invoice.metadata,
         'customer_id', 'cus_' || invoice.customer_id::text,
         'issuer_id', invoice.issuer_id,
-        'payer_policy_mode', invoice.payer_policy_mode,
-        'payer_reference', invoice.payer_reference,
+        'verification', jsonb_build_object(
+            'email', CASE WHEN invoice.expected_email IS NULL THEN NULL
+                          ELSE jsonb_build_object('expected_email', invoice.expected_email) END,
+            'merchant_auth', CASE WHEN invoice.payer_reference IS NULL THEN NULL
+                                  ELSE jsonb_build_object('payer_reference', invoice.payer_reference) END,
+            'wallet_attestation', invoice.wallet_attestation_required),
         'verification_completed_at', webhook_rfc3339(invoice.verification_completed_at),
         'likely_unsolicited_at', webhook_rfc3339(invoice.likely_unsolicited_at),
         'payer_wallet', CASE WHEN invoice.payer_wallet IS NULL THEN NULL
@@ -147,6 +154,7 @@ LANGUAGE SQL STABLE AS $$
                 THEN invoice.issuance_snapshot->'networks'->0->>'chain_id'
             ELSE NULL END,
         'wallet_bound_at', webhook_rfc3339(invoice.wallet_bound_at),
+        'ready_at', webhook_rfc3339(invoice.ready_at),
         'expires_at', webhook_rfc3339(to_timestamp(invoice.expiration_timestamp)),
         'created_at', webhook_rfc3339(invoice.created_at))
 $$;

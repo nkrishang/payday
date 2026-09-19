@@ -20,8 +20,8 @@ example image/Auth0/Route53 values, and insert the factory, batch sweeper, and
 start block from the actual testnet contract deployment. Use a distinct backend:
 
 ```hcl
-bucket       = "company-payday-terraform-state"
-key          = "sandbox/payday.tfstate"
+bucket       = "company-gum-terraform-state"
+key          = "sandbox/gum.tfstate"
 region       = "us-east-1"
 encrypt      = true
 use_lockfile = true
@@ -35,7 +35,7 @@ terraform -chdir=infra init -backend-config=backend.sandbox.hcl
 terraform -chdir=infra plan -var-file=terraform.sandbox.tfvars -out=sandbox.tfplan
 ```
 
-The distinct backend state key and `name = "payday-sandbox"` cause Terraform
+The distinct backend state key and `name = "gum-sandbox"` cause Terraform
 to instantiate a separate VPC, database, ECS cluster/services, repositories,
 secrets, signer, load balancer, alarms, and DNS record. `api_key_prefix =
 "gum_test_"` makes this service issue sandbox keys; production explicitly

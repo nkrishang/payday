@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use alloy_primitives::Address;
 use gum_core::ChainRegistry;
 
 /// Signed download links live this long unless configured otherwise.
@@ -48,6 +49,10 @@ pub struct Config {
     /// Circle's Iris API (`GUM_CCTP_IRIS_URL`), polled for the
     /// attestation of every bridge leg's burn. Mainnet by default.
     iris_url: String,
+    /// Gum's own recovery wallet (`GUM_RECOVERY_ADDRESS`), the recovery
+    /// term every payment contract commits to. Never a payer's wallet, and
+    /// never optional: a deployment without it cannot issue.
+    recovery_address: Address,
     /// How often the sweep scheduler looks at the queue when nothing woke it
     /// (`GUM_SWEEP_SCHEDULER_INTERVAL_MS`, 5000 by default).
     sweep_scheduler_interval: Duration,
@@ -156,6 +161,9 @@ impl Config {
                     .unwrap_or_else(|message| panic!("{message}")),
             });
 
+        let recovery_address = recovery_address(required("GUM_RECOVERY_ADDRESS").trim())
+            .unwrap_or_else(|message| panic!("{message}"));
+
         Config {
             bind_addr: std::env::var("GUM_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into()),
             database_url: std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
@@ -192,6 +200,7 @@ impl Config {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| crate::iris::DEFAULT_IRIS_URL.to_owned()),
+            recovery_address,
             sweep_scheduler_interval: Duration::from_millis(
                 std::env::var("GUM_SWEEP_SCHEDULER_INTERVAL_MS")
                     .ok()
@@ -216,6 +225,12 @@ impl Config {
 
     pub fn iris_url(&self) -> &str {
         &self.iris_url
+    }
+
+    /// Gum's own recovery wallet, the recovery term every payment contract
+    /// commits to.
+    pub fn recovery_address(&self) -> Address {
+        self.recovery_address
     }
 
     pub fn sweep_scheduler_interval(&self) -> Duration {
@@ -324,6 +339,21 @@ fn payer_email_from(value: Option<String>) -> Result<String, String> {
     }
 }
 
+/// The recovery wallet: a 20-byte address, checksummed or not, never the
+/// zero address — the contracts forward recoveries straight to it, where
+/// they would be uncollectible.
+fn recovery_address(value: &str) -> Result<Address, String> {
+    let address: Address = value
+        .parse::<Address>()
+        .map_err(|_| format!("invalid GUM_RECOVERY_ADDRESS '{value}': expected an EVM address"))?;
+    if address == Address::ZERO {
+        return Err(format!(
+            "invalid GUM_RECOVERY_ADDRESS '{value}': the zero address cannot custody recovered funds"
+        ));
+    }
+    Ok(address)
+}
+
 /// Exactly one attestation key source: a raw key locally, KMS in production.
 /// Both or neither is a deployment mistake, not a fallback.
 fn attestation_signer(
@@ -423,6 +453,18 @@ mod tests {
         assert!(validate_api_key_prefix("gum_test_").is_ok());
         assert!(validate_api_key_prefix("gum_dev_").is_err());
         assert!(validate_api_key_prefix("gum_live").is_err());
+    }
+
+    #[test]
+    fn recovery_address_parses_but_never_accepts_the_zero_address() {
+        let parsed = recovery_address("0xf78b72F68d560c06C36c3BeF86F1f055b83221e5").unwrap();
+        assert_eq!(
+            parsed.to_checksum(None),
+            "0xf78b72F68d560c06C36c3BeF86F1f055b83221e5"
+        );
+        assert!(recovery_address("not-an-address").is_err());
+        let zero = recovery_address(&format!("0x{}", "0".repeat(40))).unwrap_err();
+        assert!(zero.contains("zero address"), "{zero}");
     }
 
     #[test]

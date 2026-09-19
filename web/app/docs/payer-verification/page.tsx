@@ -17,36 +17,38 @@ import {
 export const metadata: Metadata = {
   title: "Verifying the payer",
   description:
-    "The three payer policies, what each one proves, and the wallet attestation every deposit request takes before it has an address.",
+    "The three verification add-ons, what each one proves, and the wallet attestation every deposit request takes before it has an address.",
 };
 
-const POLICIES = `{ "mode": "permissionless" }
-{ "mode": "verified_email", "expected_email": "alice@customer.example" }
-{ "mode": "merchant_session", "payer_reference": "user_123" }`;
+const ADD_ONS = `{ "email": { "expected_email": "alice@customer.example" } }
+{ "merchant_auth": { "payer_reference": "user_123" } }
+{ "wallet_attestation": true }
+{ "email": { "expected_email": "alice@customer.example" }, "wallet_attestation": true }`;
 
 export default function PayerVerificationPage() {
   return (
     <DocsPage
       eyebrow="Getting started"
       title="Verifying the payer"
-      lead="Every deposit request names who may pay and what they must prove first. You assert; Gum confirms; and whatever the policy, the payer signs once from the wallet they will pay from before an address exists."
+      lead="A deposit request can carry independent verification add-ons: prove a mailbox, gate on your own sign-in, or attest the paying wallet. You assert; Gum confirms; and whatever the add-ons, the payer signs once from the wallet they will pay from before an address exists."
     >
       <p>
         Verification answers a question a bank transfer never could: was the money sent by the
         person you were expecting, and did they see what they were paying for? Gum splits that
-        into two parts. The <strong>payer policy</strong> decides what a person proves before the
-        request&apos;s content is shown to them. The <strong>wallet step</strong> then ties that
-        person to the wallet the funds will come from.
+        into two parts. The <strong>verification add-ons</strong> decide what a person proves
+        before the request&apos;s content is shown to them. The <strong>wallet step</strong> then
+        ties that person to the wallet the funds will come from. The add-ons are independent and
+        combinable, and a request with none of them is fully permissionless.
       </p>
 
-      <H2 id="the-three-policies">The three policies</H2>
-      <CodeBlock code={POLICIES} lang="json" title="payer_policy" />
+      <H2 id="the-three-policies">The three add-ons</H2>
+      <CodeBlock code={ADD_ONS} lang="json" title="verification" />
 
       <Compare>
-        <CompareItem title="Permissionless" badge={<Pill>open link</Pill>}>
+        <CompareItem title="None of them" badge={<Pill>open link</Pill>}>
           <p>
-            Anyone holding the link sees the request and can pay it. Nothing is proved beyond the
-            wallet step.
+            Omit <code>verification</code> and anyone holding the link sees the request and can pay
+            it. Nothing is proved beyond the wallet step.
           </p>
           <p>
             <strong>Use it</strong> for a one-off invoice you email yourself, or when the link is
@@ -78,22 +80,30 @@ export default function PayerVerificationPage() {
       </Compare>
 
       <p>
+        The add-ons combine: <code>{`{ "email": { "expected_email": "…" }, "wallet_attestation": true }`}</code>{" "}
+        asks for both the mailbox and the attested wallet. <code>email</code> and{" "}
+        <code>merchant_auth</code> are identity add-ons — either one satisfies{" "}
+        <code>verification.approved</code> — while <code>wallet_attestation</code> takes no
+        assertion of its own: the payer signs, and the signature is the fact.
+      </p>
+
+      <p>
         The merchant asserts, Gum confirms. Gum tells you whether the check passed and when,
-        never the payer&apos;s own data. The full policy, including the expected email or the payer
-        reference, is returned only to you; the payer page shows a masked hint such as{" "}
-        <code>a****@c***.example</code> for verified email, and nothing at all for a merchant
-        session.
+        never the payer&apos;s own data. Your assertions — the expected email or the payer
+        reference — are returned only to you; the payer page shows a masked hint such as{" "}
+        <code>a****@c***.example</code> for the email add-on, and nothing at all for merchant
+        auth.
       </p>
 
       <H2 id="what-the-payer-sees">What the payer sees, and when</H2>
       <p>
-        A gated request discloses progressively. Until the policy is satisfied, only the issuer name
-        and heading are shown; until the wallet is bound, there is no address to show.
+        A gated request discloses progressively. Until the identity add-ons are satisfied, only the
+        issuer name and heading are shown; until the wallet is bound, there is no address to show.
       </p>
-      <Figure caption="Disclosure by moment. A permissionless request starts in the middle column: everything but the address is visible at once.">
+      <Figure caption="Disclosure by moment. A request with no add-ons starts in the middle column: everything but the address is visible at once.">
         <DisclosureTable />
       </Figure>
-      <Figure caption="Never shown to a payer, whatever the policy.">
+      <Figure caption="Never shown to a payer, whatever the add-ons.">
         <NeverShown />
       </Figure>
 
@@ -138,18 +148,23 @@ export default function PayerVerificationPage() {
         </li>
       </ul>
 
-      <H2 id="merchant-session">Merchant session, step by step</H2>
+      <H2 id="merchant-session">Merchant auth, step by step</H2>
       <p>
-        This is the mode for applications with their own sign-in. Your server creates the request,
-        receives a <code>client_secret</code> once, and sends the signed-in user to the checkout
-        with that secret in the URL fragment. Exchanging the secret is the verification.
+        This is the add-on for applications with their own sign-in. Your server creates the request
+        naming the signed-in user by your own id, receives a <code>client_secret</code> once, and
+        sends the user to the checkout with that secret in the URL fragment. Exchanging the secret
+        is the verification.
       </p>
-      <Figure caption="The merchant-session exchange. The secret rides in the URL fragment, which browsers never send to a server, so it reaches no log, Referer header, or analytics beacon.">
+      <Figure caption="The merchant-auth exchange. The secret rides in the URL fragment, which browsers never send to a server, so it reaches no log, Referer header, or analytics beacon.">
         <Sequence
-          label="Merchant session sequence: your server creates the request and receives a client secret, redirects the signed-in user to the deposit URL with the secret in the fragment, the checkout exchanges it for a session, the payer signs and pays, and webhooks carrying the payer reference reach your server."
+          label="Merchant auth sequence: your server creates the request and receives a client secret, redirects the signed-in user to the deposit URL with the secret in the fragment, the checkout exchanges it for a session, the payer signs and pays, and webhooks carrying the payer reference reach your server."
           lanes={["Your server", "Payer's browser", "Gum"]}
           messages={[
-            { from: 0, to: 2, label: "create { mode: merchant_session, payer_reference }" },
+            {
+              from: 0,
+              to: 2,
+              label: "create { verification: { merchant_auth: { payer_reference } } }",
+            },
             {
               from: 2,
               to: 0,
@@ -194,16 +209,16 @@ export default function PayerVerificationPage() {
         </li>
       </ul>
       <Callout title="Created through the API only">
-        The dashboard shows merchant-session requests, with your payer reference and an &quot;Opened
+        The dashboard shows merchant-auth requests, with your payer reference and an &quot;Opened
         by your app&quot; entry in the verification activity, but cannot compose one: it has no
         signed-in user to hand the secret to.
       </Callout>
 
       <H2 id="the-wallet-step">The wallet step</H2>
       <p>
-        Whichever policy a request has, the payer signs one message before the address exists. It is
-        an <a href="https://eips.ethereum.org/EIPS/eip-712">EIP-712</a> typed-data signature, the
-        kind every wallet displays in full before signing: a plain statement, the request&apos;s
+        Whatever add-ons a request carries, the payer signs one message before the address exists.
+        It is an <a href="https://eips.ethereum.org/EIPS/eip-712">EIP-712</a> typed-data signature,
+        the kind every wallet displays in full before signing: a plain statement, the request&apos;s
         attribution hash, the wallet address, a one-time nonce, and an expiry. No transaction, no
         gas, no approval.
       </p>
@@ -230,8 +245,8 @@ export default function PayerVerificationPage() {
           <tr>
             <td>nonce</td>
             <td>
-              Minted for this session once the policy is satisfied, valid for ten minutes. It is
-              what ties the person who passed the checks to the wallet.
+              Minted for this session once the identity add-ons are satisfied, valid for ten
+              minutes. It is what ties the person who passed the checks to the wallet.
             </td>
           </tr>
           <tr>
@@ -241,10 +256,10 @@ export default function PayerVerificationPage() {
         </tbody>
       </Table>
       <p>
-        Once accepted, the salt, the recovery term (the wallet), and the address are written
-        together, once. A <code>deposit_request.ready</code> webhook reports it, and the checkout
-        shows the address, the QR, and the pay button. The pay button refuses to send from any
-        wallet but the attested one.
+        Once accepted, the salt, the recovery term (always Gum&apos;s own recovery wallet), and the
+        address are written together, once. A <code>deposit_request.ready</code> webhook reports it,
+        and the checkout shows the address, the QR, and the pay button. The pay button refuses to
+        send from any wallet but the attested one.
       </p>
       <Callout title="Externally owned accounts for now">
         The signature must recover directly to the wallet address, which is how every ordinary
@@ -255,8 +270,8 @@ export default function PayerVerificationPage() {
       <p>Every request reports verification separately from its status:</p>
       <ul>
         <li>
-          <code>verification_completed_at</code>: when the policy was satisfied; <code>null</code>{" "}
-          until then, and always <code>null</code> for permissionless requests;
+          <code>verification_completed_at</code>: when the identity add-ons were satisfied;{" "}
+          <code>null</code> until then, and always <code>null</code> for a request with neither;
         </li>
         <li>
           <code>likely_unsolicited_at</code>: when finalized funds first arrived from a wallet other

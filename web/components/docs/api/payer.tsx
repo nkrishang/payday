@@ -8,7 +8,7 @@ const LOCKED = `{
   "id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "issuer_name": "Acme LLC",
   "heading": "March retainer",
-  "payer_policy": { "mode": "verified_email", "expected_email_hint": "a****@c***.example" },
+  "expected_email_hint": "a****@c***.example",
   "requirements": { "email": "pending", "wallet": "pending", "merchant_session": "not_required", "complete": false },
   "status": "awaiting_deposit",
   "payable": true,
@@ -38,7 +38,7 @@ const UNLOCKED = `{
   "id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "issuer_name": "Acme LLC",
   "heading": "March retainer",
-  "payer_policy": { "mode": "verified_email", "expected_email_hint": "a****@c***.example" },
+  "expected_email_hint": "a****@c***.example",
   "requirements": { "email": "approved", "wallet": "approved", "merchant_session": "not_required", "complete": true },
   "status": "awaiting_deposit",
   "payable": true,
@@ -95,9 +95,9 @@ export const PAYER: EndpointGroup = {
       body: (
         <>
           <p>
-            Gated modes: <code>networks</code>, amounts, <code>details</code>, and{" "}
-            <code>settlement_tx_hash</code> are null until the session satisfies the policy.
-            Permissionless: present immediately. <code>chain</code>, <code>token</code>,{" "}
+            With identity add-ons (email or merchant auth): <code>networks</code>, amounts,{" "}
+            <code>details</code>, and <code>settlement_tx_hash</code> are null until verification
+            completes. With neither: present immediately. <code>chain</code>, <code>token</code>,{" "}
             <code>payer_wallet</code>, <code>address</code>, <code>address_explorer_url</code>, and{" "}
             <code>deposit_uri</code> are null until a wallet is bound on a chosen network;{" "}
             <code>deposit_uri</code> returns to null when <code>payable</code> is false.
@@ -105,7 +105,7 @@ export const PAYER: EndpointGroup = {
           <p>
             With a session, <code>requirements</code> reflects that session. Without one, it
             reflects the request as a whole and unlocks nothing. No merchant data is present: no
-            payout or recovery address, metadata, customer, or policy assertion.
+            payout or recovery address, metadata, customer, or verification assertion.
           </p>
         </>
       ),
@@ -115,9 +115,10 @@ export const PAYER: EndpointGroup = {
         fields: [
           { name: "issuer_name, heading", type: "string", description: "Always present." },
           {
-            name: "payer_policy",
-            type: "object",
-            description: "{ mode, expected_email_hint }. Hint is null under merchant_session.",
+            name: "expected_email_hint",
+            type: "string | null",
+            description:
+              "Masked hint at the expected mailbox, when the request attaches the email add-on; never the mailbox itself.",
           },
           {
             name: "requirements",
@@ -288,11 +289,11 @@ Cache-Control: no-store`,
       },
       answers: [
         { status: 429, code: "otp_resend_cooldown", when: "Retry-After set." },
-        { status: 409, code: "verification_not_required", when: "Mode is permissionless." },
+        { status: 409, code: "verification_not_required", when: "No identity add-ons." },
         {
           status: 409,
           code: "verification_method_not_applicable",
-          when: "Mode is merchant_session.",
+          when: "The request has no email add-on.",
         },
         {
           status: 410,
@@ -359,8 +360,8 @@ Cache-Control: no-store`,
       summary: "Exchanges a merchant_session client secret for a payer session. Single use.",
       body: (
         <p>
-          The exchange is the verification: mints a 24-hour session satisfying the policy, records
-          an approved <code>merchant_session</code> attempt, and sets{" "}
+          The exchange is the verification: mints a 24-hour session satisfying the request&apos;s
+          add-ons, records an approved <code>merchant_session</code> attempt, and sets{" "}
           <code>verification_completed_at</code> while the request is live. Unknown, malformed,
           expired, and foreign secrets receive one answer. Response is{" "}
           <code>Cache-Control: no-store</code>.
@@ -387,6 +388,49 @@ Cache-Control: no-store`,
       },
     },
     {
+      slug: "network",
+      title: "Choose the network",
+      method: "POST",
+      path: "/v1/payer/deposit-requests/{id}/network",
+      auth: "payer_session",
+      summary: "Binds the request to the chosen network and mints its payment address.",
+      body: (
+        <p>
+          For a request without the wallet-attestation add-on — its address waits for the
+          signature instead (<code>409 wallet_attestation_required</code> here). Idempotent for the
+          network already chosen; any other network is a conflict, because the address commits to
+          the first one. A gated request answers only a session that satisfies its identity
+          add-ons; an open one needs no session.
+        </p>
+      ),
+      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated requests." }],
+      pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
+      bodyFields: [
+        {
+          name: "chain_id",
+          type: "string",
+          required: true,
+          description: "The chosen network. One of the request's networks[].chain.id.",
+        },
+      ],
+      response: { description: "Payer view, with address, chain, and token." },
+      answers: [
+        { status: 409, code: "wallet_attestation_required", when: "The request attests its wallet." },
+        { status: 409, code: "network_already_chosen", when: "A different network was bound." },
+        { status: 401, code: "verification_required / payer_session_invalid", when: "Gated; session missing or unsatisfied." },
+        { status: 422, code: "unsupported_chain", when: "chain_id is not one of the request's networks." },
+      ],
+      examples: {
+        curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/network" \\
+  -H "Gum-Payer-Session: $PAYER_SESSION" \\
+  -H "Content-Type: application/json" \\
+  -d '{ "chain_id": "143" }'`,
+        ts: `const view = await payer.depositRequests.selectNetwork(id, "143", { payerSession });`,
+        response: UNLOCKED,
+        responseTitle: "200 OK — bound, address minted",
+      },
+    },
+    {
       slug: "wallet-challenge",
       title: "Create a wallet challenge",
       method: "POST",
@@ -395,9 +439,10 @@ Cache-Control: no-store`,
       summary: "Mints a one-time nonce and returns the EIP-712 attestation to sign.",
       body: (
         <p>
-          Required for every request before an address exists. Gated modes require a session that
-          satisfies the policy; permissionless requests without a session receive one. The payer
-          chooses the network here: <code>chain_id</code> must be one of the request&apos;s{" "}
+          Only for a request with the wallet-attestation add-on (<code>409
+          wallet_attestation_not_required</code> otherwise); a request without it chooses its
+          network on <code>POST …/network</code> and needs no signature. The payer chooses the
+          network here: <code>chain_id</code> must be one of the request&apos;s{" "}
           <code>networks</code> (a single entry when the merchant pinned it), and the typed
           data&apos;s domain names that chain and its factory,
           so the wallet must be on it to sign. The attestation binds the wallet to that chain and
@@ -405,7 +450,7 @@ Cache-Control: no-store`,
           <code>eth_signTypedData_v4</code> unmodified. Challenge validity: ten minutes.
         </p>
       ),
-      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
+      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated requests." }],
       pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       bodyFields: [
         { name: "wallet", type: "string", required: true, description: "Paying wallet." },
@@ -425,7 +470,7 @@ Cache-Control: no-store`,
             name: "typed_data",
             type: "object",
             description:
-              'Domain { name: "Gum", version: "1", chainId, verifyingContract } for the chosen network. Primary type PayerAttestation. Message { statement, attributionHash, wallet, nonce, expiresAt }.',
+              'Domain { name: "Gum", version: "2", chainId, verifyingContract } for the chosen network. Primary type PayerAttestation. Message { statement, attributionHash, wallet, nonce, expiresAt }.',
           },
         ],
       },
@@ -451,7 +496,7 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
   "expires_at": "2026-09-06T12:15:00Z",
   "chain": { "id": "143", "name": "Monad" },
   "typed_data": {
-    "domain": { "name": "Gum", "version": "1", "chainId": 143, "verifyingContract": "0x…" },
+    "domain": { "name": "Gum", "version": "2", "chainId": 143, "verifyingContract": "0x…" },
     "primaryType": "PayerAttestation",
     "types": { "EIP712Domain": [ "…" ], "PayerAttestation": [ "…" ] },
     "message": {
@@ -474,8 +519,9 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       summary: "Submits the signature. Binds the wallet and derives the deposit address.",
       body: (
         <p>
-          Signature must recover to <code>wallet</code> (EOA only). Salt, recovery term, and address
-          are written atomically, once. Raises <code>deposit_request.ready</code>.
+          Signature must recover to <code>wallet</code> (EOA only). Salt, recovery term (always
+          Gum&apos;s own recovery wallet), and address are written atomically, once. Raises{" "}
+          <code>deposit_request.ready</code>.
         </p>
       ),
       headers: SESSION_HEADER,
@@ -522,7 +568,7 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
           to add it.
         </p>
       ),
-      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
+      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated requests." }],
       pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
         fields: [
@@ -564,7 +610,7 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       summary: "Asks Relay for a route and records it as a quote.",
       body: (
         <p>
-          Gum makes the quote, never the page: it pins the attested wallet as the sender, the
+          Gum makes the quote, never the page: it pins the sending wallet the request names, the
           payment address as the recipient, the request&apos;s currency on its network as what
           lands, and exactly the amount still due as the output. The payer sends any of the
           origin&apos;s listed tokens; Relay swaps it, and the payer bears the spread. The answer is
@@ -573,7 +619,7 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
           Every quote is a <code>rli_</code> record; only one reported as sent is followed.
         </p>
       ),
-      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
+      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated requests." }],
       pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       bodyFields: [
         {
@@ -581,6 +627,13 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
           type: "string",
           required: true,
           description: "Decimal chain id, one of the networks to pay from.",
+        },
+        {
+          name: "payer_wallet",
+          type: "string",
+          required: true,
+          description:
+            "The wallet that will send the origin transactions. Relay builds its steps for it, and only its report of the send is accepted.",
         },
         {
           name: "origin_token",
@@ -626,9 +679,10 @@ const signature = await wallet.signTypedData({ account, ...challenge.typed_data 
       examples: {
         curl: `curl -fsS -X POST "$API/v1/payer/deposit-requests/dr_0198f80c-…/relay/quotes" \\
   -H "Content-Type: application/json" \\
-  -d '{ "origin_chain_id": "8453", "origin_token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }'`,
+  -d '{ "origin_chain_id": "8453", "payer_wallet": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8", "origin_token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }'`,
         ts: `// originToken: an address from the origin's tokens; omitted, its USDC.
-const quote = await payer.relay.quote(id, "8453", { originToken, payerSession });
+// payerWallet: the connected wallet that will send the origin transactions.
+const quote = await payer.relay.quote(id, "8453", { payerWallet: account.address, originToken, payerSession });
 for (const step of quote.steps) {
   await wallet.sendTransaction({ account, to: step.transaction.to, data: step.transaction.data, value: BigInt(step.transaction.value) });
 }`,
@@ -663,7 +717,7 @@ for (const step of quote.steps) {
           origin transaction Relay records is what the proof names.
         </p>
       ),
-      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated modes." }],
+      headers: [{ ...SESSION_HEADER[0]!, description: "Required for gated requests." }],
       pathParams: [
         { name: "id", type: "dr_ id", required: true, description: "" },
         { name: "rli", type: "rli_ id", required: true, description: "The quote." },

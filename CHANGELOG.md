@@ -9,7 +9,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 ### Added
 
 - A staging environment (`docs/staging.md`): a second, isolated copy of the
-  AWS stack at `api.staging.payday.sh`, on Monad mainnet with real USDC and
+  AWS stack at `api.staging.gum.money`, on Monad mainnet with real USDC and
   its own contract generation, database, keys, bucket, and email identity,
   whose checkout origin is the web app on the operator's machine. `just
   web-staging` serves the local web app against it (`web/.env.staging`),
@@ -30,7 +30,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 - The product is Gum. Every surface carries the new name: the TypeScript
   SDK is `@gum/sdk` with `GumClient`, `GumPayerClient`, and `GumError`
-  (was `@payday/sdk`, `PaydayClient`, `PaydayPayerClient`, `PaydayError`);
+  (was `@gum/sdk`, `GumClient`, `GumPayerClient`, `GumError`);
   the web app is `@gum/web`; every environment variable is `GUM_*`; the
   webhook and payer-session headers are `Gum-Event-Id`, `Gum-Event-Type`,
   `Gum-Signature`, and `Gum-Payer-Session`; API keys mint as `gum_live_`,
@@ -97,6 +97,64 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   (`POST /v1/wallets/pregenerate`) stays: it is part of sign-up, not the
   walkthrough.
 
+### Changed (breaking)
+
+- Payer verification is rebuilt around three independent, optional add-ons,
+  and recovery now always runs through Gum's own custody. The create
+  API's `payer_policy` field is gone: `POST /v1/deposit-requests` takes an
+  optional `verification` object whose keys are `email`
+  (`{"expected_email": …}`, the same OTP flow as before), `merchant_auth`
+  (`{"payer_reference": …}`, the merchant-session client-secret flow,
+  unchanged), and `wallet_attestation` (`true`, the EIP-712 signature from
+  the wallet the payer will pay from). Any combination may be attached;
+  omitted or `{}` means none, which is fully permissionless. A request
+  carrying `payer_policy` is rejected as an unknown field.
+- The deposit address exists as soon as the request's network is fixed.
+  With `chain_id` pinned (or on a single-network deployment) the create
+  response already carries `address` and no payer signature is involved at
+  all: the payer may pay from any wallet, an exchange withdrawal included.
+  Without a pin, the payer picks a network on the hosted checkout's new
+  network-selection step (`POST /v1/payer/deposit-requests/{id}/network`,
+  no wallet signature needed). With the wallet-attestation add-on, the old
+  wallet step happens — challenge and attest from the chosen network — and
+  the address exists only after it. Content gating (`content_unlocked`) is
+  driven by the identity add-ons (email, merchant auth) only.
+- Recovery is always Gum's own dedicated KMS recovery wallet
+  (`GUM_RECOVERY_ADDRESS`), in every case including wallet-attested
+  requests. Overpayment remainders, expired balances, late transfers, and
+  wrong-network or wrong-token recoveries land in that custody on-chain,
+  and Gum returns the funds to the payer manually, after review — never
+  automatically on-chain to the payer's wallet, which is never the recovery
+  term. The earlier promise that returns always reach the payer's wallet
+  automatically and that Gum never holds funds no longer holds and is
+  removed from the documentation; `recovery_address` on the API objects
+  names the custody address, and `deposit_request.recovered_funds`
+  webhooks report each recovery.
+- On a wallet-attested request, deposits observed from any wallet other
+  than the attested one are flagged `likely_unsolicited_at` as before:
+  they still count toward the amount and settle, but no Proof of Payment is
+  issued. Without wallet attestation, incoming deposits are never flagged.
+- Proof of Payment is now `gum.proof.v5` with a `scope`:
+  `wallet_attributed` (the request carried wallet attestation — the old
+  claim that the attested wallet signed and every credited transfer came
+  from it) or `settlement` (no wallet attestation — the proof ties the
+  request document to the address, the credited transfers, and the
+  settlement, and makes no claim about who paid). The canonical issuance
+  snapshot is `gum.invoice.v5`, which includes the recovery address and
+  the verification add-on configuration in place of `payer_policy`. Salt
+  derivation now also commits to a server-generated issuance nonce, which
+  the proof carries.
+- Relay (paying from another chain) is unavailable for wallet-attested
+  requests, because a relay solver pays from a different wallet; it remains
+  available for requests without wallet attestation.
+- The wallet attestation statement the payer signs no longer says that
+  funds return to the payer's wallet: it states that the signer controls
+  the wallet and intends it to pay the deposit request.
+- The operator-facing consequence: recovered funds sit in Gum's custody
+  until reviewed and returned by hand, a manual procedure signed with the
+  dedicated recovery KMS key (`docs/production-runbook.md` §"Recovery
+  custody and manual returns", `docs/runbooks/wrong-network-deposit.md`,
+  `docs/runbooks/stuck-deposit-request.md`).
 
 ### Added
 
@@ -107,7 +165,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   Tether's USDT0 on Monad (`0xe7cd86e13AC4309349F30B3435a9d337750fC82D`)
   and Arbitrum One (`0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9`), which
   `token.symbol` names as `USDT0`. Base's USDT is a bridge wrapper without
-  EIP-3009 and is not served. Payday never gives a merchant a rate worse
+  EIP-3009 and is not served. Gum never gives a merchant a rate worse
   than 1:1, and only USDC has a 1:1 path between chains (CCTP), so a USDT
   request must pin `chain_id` to a network serving it (`400
   invalid_request` naming `chain_id` when it is missing; `422
@@ -141,11 +199,11 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `origin_token`, with `amount_in` in it. Relay swaps into the request's
   currency; the spread is the payer's. The hosted checkout's "pay from
   another network" menu offers one entry per network and token.
-- The canonical issuance snapshot is `payday.invoice.v4`: it states
+- The canonical issuance snapshot is `gum.invoice.v4`: it states
   `currency` and `decimals`, and the attribution hash domain is
-  `PAYDAY_ATTRIBUTION_V4`. The proof version is unchanged; a proof verifies
+  `GUM_ATTRIBUTION_V4`. The proof version is unchanged; a proof verifies
   only against a v4 snapshot.
-- Configuration. `PAYDAY_CHAINS` entries list `tokens` (`[{"currency",
+- Configuration. `GUM_CHAINS` entries list `tokens` (`[{"currency",
   "address"}]`) and `start_block` in place of `usdc` and `usdc_start_block`;
   a `cctp` block needs USDC on its chain, and some chain must list USDC (the
   onboarding demo pays it). `NEXT_PUBLIC_CHAINS` entries list `tokens`
@@ -157,10 +215,10 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   payment: it stays at the address for `recover(address)` to return. Adding
   a currency to a live chain is not a contract generation change and needs
   no backfill. The local stack deploys a second mock stablecoin as USDT
-  (`PAYDAY_USDT_ADDRESS`, account #0 nonce 3) on the first chain only; the
+  (`GUM_USDT_ADDRESS`, account #0 nonce 3) on the first chain only; the
   Relay stand-in quotes between the two tokens; `just e2e` issues, pays,
   relays into and withdraws USDT; `scripts/live-smoke.sh` takes
-  `PAYDAY_CURRENCY=USDT`. `MockUSDC.sol` is `MockStablecoin.sol`, built with
+  `GUM_CURRENCY=USDT`. `MockUSDC.sol` is `MockStablecoin.sol`, built with
   a name and symbol.
 - The dashboard composer takes a Currency before the Network, with no
   "Payer's choice" for USDT; the account section shows each network's
@@ -181,17 +239,17 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   offering one.
 - Paying from another network, through Relay (relay.link). Once the
   address exists, the hosted checkout offers "Pay from another network":
-  the payer picks any chain Relay takes USDC deposits on, Payday quotes
+  the payer picks any chain Relay takes USDC deposits on, Gum quotes
   the route (`POST /v1/payer/deposit-requests/{id}/relay/quotes`, after
   `GET …/relay/chains`), the page sends the quote's transactions from the
   attested wallet and reports the deposit (`POST …/relay/quotes/{rli}/sent`),
   and Relay's solver delivers exactly the amount due to the payment
   address on the request's chain. The quote is made by the API, which
   pins the sender, the recipient, and the amount, and holds the Relay key
-  (`PAYDAY_RELAY_API_KEY`; unset leaves the option off and the routes
+  (`GUM_RELAY_API_KEY`; unset leaves the option off and the routes
   answering `404 relay_unavailable`). Only chains the deployment serves are
   offered as origins: attribution verifies the origin transaction's receipt
-  on the origin chain itself, so a chain whose receipts Payday cannot read
+  on the origin chain itself, so a chain whose receipts Gum cannot read
   is never quoted. The indexer follows each reported quote (`relay_intents`,
   migrations 0008 and 0009): a transfer from Relay's solver for a quote the
   payer reported as sent is parked rather than flagged as likely
@@ -207,7 +265,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   report it is not sure landed. The payer view
   gains `relay_available` and `relay`; transfers gain `relay
   {request_id, origin_chain_id, origin_transaction_hash}`.
-- Proof of Payment v4 (`payday.proof.v4`, `payday.attestation.v4`). A
+- Proof of Payment v4 (`gum.proof.v4`, `gum.attestation.v4`). A
   relayed transfer carries `relay {request_id, origin_chain_id,
   origin_transaction_hash, origin_sender, attribution_source}`, and the
   attestation payload lists the same blocks as `relay_fills`. A verifier
@@ -227,11 +285,11 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   withdrawals, and consumes execution events. `gum-indexer` is a read-only
   chain observer with no database connection and no keys; it reports
   cursors, finalized heads, ranges and faults to the server's new internal
-  HTTP listener (`PAYDAY_INTERNAL_BIND_ADDR`, `PAYDAY_SERVER_INTERNAL_URL`,
-  bearer `PAYDAY_INTERNAL_TOKEN`) with compare-and-set on the server-owned
+  HTTP listener (`GUM_INTERNAL_BIND_ADDR`, `GUM_SERVER_INTERNAL_URL`,
+  bearer `GUM_INTERNAL_TOKEN`) with compare-and-set on the server-owned
   cursor, so a restart or a duplicate indexer cannot skip or double-apply a
   range. `gum-signers` is new and the only holder of KMS or local signing
-  keys (`PAYDAY_KMS_KEY_IDS` / `PAYDAY_SIGNER_KEYS` moved to it): it
+  keys (`GUM_KMS_KEY_IDS` / `GUM_SIGNER_KEYS` moved to it): it
   consumes `SweepBatch` and `WithdrawalStep` commands, keeps one
   transaction lane per signer per chain in the new `execution` schema,
   persists signed bytes before broadcast, replaces, abandons and reconciles
@@ -290,7 +348,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   address together. The SDK's `wallet.challenge` takes the chain id;
   `WalletChallenge` reports `chain`. `GET /v1/status` answers
   `{chains: [...]}`, one entry per network. The merchant never picks a
-  network; the dashboard shows the Payday wallet's USDC and gas balance on
+  network; the dashboard shows the Gum wallet's USDC and gas balance on
   every network, and a deposit's network once the payer has chosen.
 - A new contract generation: `Payment` takes the chain id, refuses to
   route anything when `block.chainid` differs (emitting `WrongChain`), and
@@ -301,39 +359,39 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   lands at identical addresses on every chain, which is what makes a
   deposit sent on the wrong network returnable by hand
   (`docs/runbooks/wrong-network-deposit.md`).
-- Canonical issuance snapshot `payday.invoice.v3` (`networks: [{chain_id,
+- Canonical issuance snapshot `gum.invoice.v3` (`networks: [{chain_id,
   token_address, factory_address}]` sorted by chain id, in place of the
   top-level chain, token, and factory), attribution and salt domains v3,
-  Proof of Payment `payday.proof.v3`: the proof's `chain_id`, `token_address`,
+  Proof of Payment `gum.proof.v3`: the proof's `chain_id`, `token_address`,
   and `factory_address` name the payer's choice, which `verify_proof`
   requires to be one of the snapshot's networks. Pre-release: no earlier
   proof or database is carried forward; migration `0004` makes the invoice
   chain columns part of the binding and adds the challenge's chain.
-- Both services read one network registry, `PAYDAY_CHAINS` (a JSON array
+- Both services read one network registry, `GUM_CHAINS` (a JSON array
   of `{chain_id, usdc, factory, batch_sweeper, factory_code_hash,
   batch_sweeper_code_hash, usdc_start_block, finality_source,
   finality_confirmations, block_time_ms, log_range_size,
-  explorer_base_url}`), with one `PAYDAY_RPC_URL_<chain_id>` per chain
-  (`PAYDAY_RPC_WS_URL_<chain_id>` to override or disable the signal), in
-  place of `PAYDAY_CHAIN_ID`, `PAYDAY_FACTORY_ADDRESS`,
-  `PAYDAY_BATCH_SWEEPER_ADDRESS`, the two code-hash variables,
-  `PAYDAY_USDC_ADDRESS`, `PAYDAY_USDC_START_BLOCK`, `PAYDAY_RPC_URL`,
-  `PAYDAY_RPC_WS_URL`, `PAYDAY_FINALITY_SOURCE`,
-  `PAYDAY_FINALITY_CONFIRMATIONS`, `PAYDAY_LOG_RANGE_SIZE`, and
-  `PAYDAY_EXPLORER_BASE_URL`. Terraform takes `chains` and a sensitive
+  explorer_base_url}`), with one `GUM_RPC_URL_<chain_id>` per chain
+  (`GUM_RPC_WS_URL_<chain_id>` to override or disable the signal), in
+  place of `GUM_CHAIN_ID`, `GUM_FACTORY_ADDRESS`,
+  `GUM_BATCH_SWEEPER_ADDRESS`, the two code-hash variables,
+  `GUM_USDC_ADDRESS`, `GUM_USDC_START_BLOCK`, `GUM_RPC_URL`,
+  `GUM_RPC_WS_URL`, `GUM_FINALITY_SOURCE`,
+  `GUM_FINALITY_CONFIRMATIONS`, `GUM_LOG_RANGE_SIZE`, and
+  `GUM_EXPLORER_BASE_URL`. Terraform takes `chains` and a sensitive
   `rpc_urls` map (`TF_VAR_rpc_urls`), one Secrets Manager secret per
   chain; the staging workflow reads `STAGING_RPC_URLS`. The web app takes
   `NEXT_PUBLIC_CHAINS` in place of the five single-chain variables.
   Deployment verification runs on every chain at startup.
 - The indexer runs one worker per chain in one process and scans on
   demand: a chain with nothing to watch fast-forwards its cursor every
-  `PAYDAY_INDEXER_IDLE_INTERVAL_MS` (five minutes) without `eth_getLogs`
+  `GUM_INDEXER_IDLE_INTERVAL_MS` (five minutes) without `eth_getLogs`
   and holds no WebSocket, so an idle chain costs about two calls every five
   minutes; three idle chains cost less than a fifth of the one
   always-scanning chain before. Every range's `eth_getLogs` is filtered to
-  the addresses Payday is watching, 500 per call, on every chain, so RPC
-  spend follows Payday's own activity and never a chain's USDC volume; the
-  late-watch window that bounds the list (`PAYDAY_INDEXER_LATE_WATCH_DAYS`)
+  the addresses Gum is watching, 500 per call, on every chain, so RPC
+  spend follows Gum's own activity and never a chain's USDC volume; the
+  late-watch window that bounds the list (`GUM_INDEXER_LATE_WATCH_DAYS`)
   defaults to a year, and a late transfer outside it is returned by hand.
   Base and Arbitrum One settle on `latest` minus a confirmation depth
   (their `finalized` tag is L1 finality); Monad keeps `finalized`. A wake
@@ -346,7 +404,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Added
 
-- Customer documentation at `payday.sh/docs` (`web/app/docs`), in the web
+- Customer documentation at `gum.money/docs` (`web/app/docs`), in the web
   app's own design: an introduction, quickstart, concepts, payer
   verification, the dashboard, the hosted checkout, webhooks, Proof of
   Payment, recipes, the TypeScript SDK, environments, an architecture and
@@ -371,7 +429,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   as deposit requests' `dr_` ids already were: `cus_` customer, `iss_`
   issuer identity, `pa_` payout address, `att_` attachment, `wh_` webhook
   endpoint, `whd_` webhook delivery, `evt_` webhook event (the envelope `id`
-  and `Payday-Event-Id`), `va_` verification attempt, `rec_` recovery ledger
+  and `Gum-Event-Id`), `va_` verification attempt, `rec_` recovery ledger
   entry, and `acct_` account. Only that canonical form is accepted back: a
   bare UUID or the wrong prefix in a path is `404 <resource>_not_found`, and
   in a body or query field `400 invalid_request` naming the form wanted. The
@@ -431,11 +489,11 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 - A payer named with an `email` on a deposit request is emailed their link
   to it as the request is issued, from the dashboard or the API alike. The
-  message comes from `contact@payday.sh` through Resend
-  (`PAYDAY_RESEND_API_KEY`, `PAYDAY_PAYER_EMAIL_FROM`; `resend_api_key` and
-  `payer_email_from` in Terraform), in Payday's design, and names the
+  message comes from `contact@gum.money` through Resend
+  (`GUM_RESEND_API_KEY`, `GUM_PAYER_EMAIL_FROM`; `resend_api_key` and
+  `payer_email_from` in Terraform), in Gum's design, and names the
   issuer, the amount, the heading and reference, and the expiry, with a
-  button to the `deposit_url` and `contact@payday.sh` for questions. It is
+  button to the `deposit_url` and `contact@gum.money` for questions. It is
   queued in the issuing transaction, as a `payer` row of the notification
   outbox, and sent by the dispatcher that already delivers merchant
   attention email, so issuance never waits on the provider, transient
@@ -447,11 +505,11 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Changed
 
-- The public status page is gone: the `status.payday.sh` hostname, the
+- The public status page is gone: the `status.gum.money` hostname, the
   separate ECS `status` service with its target group, listener rule, alarms,
-  log group, and IAM role, `gum-server`'s `PAYDAY_STATUS_ONLY` mode and its
+  log group, and IAM role, `gum-server`'s `GUM_STATUS_ONLY` mode and its
   `/`, `/live`, and unauthenticated `/v1/status` routes, the
-  `PAYDAY_STATUS_INDEXER_STALE_SECONDS` setting, the API heartbeat and the
+  `GUM_STATUS_INDEXER_STALE_SECONDS` setting, the API heartbeat and the
   `api_status` table that existed only to feed the page, and the
   public-status-incident runbook. The authenticated merchant `GET /v1/status`
   and the SDK's `status()` are unchanged.
@@ -460,26 +518,26 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   schema that the pre-release chain of 21 migrations ended with (same
   tables, columns, constraints, indexes, functions, and triggers; the one
   constraint name PostgreSQL had truncated at 63 characters is spelled out
-  as `payment_observations_collected_at_tx_index_non_negative`). Payday is
+  as `payment_observations_collected_at_tx_index_non_negative`). Gum is
   pre-release with no data to carry forward, so there is no upgrade path:
   a database that ran the old chain refuses the new set, and every existing
   environment is recreated empty. Until launch, schema changes keep editing
   the baseline; staging recreates its database when it deploys one.
-- `pay.payday.sh` is gone. It was a second hostname on the API's load
+- `pay.gum.money` is gone. It was a second hostname on the API's load
   balancer whose only page, `GET /pay/{id}`, answered a `301` to the checkout
-  on `payday.sh`; every `deposit_url` already points at the checkout, so the
+  on `gum.money`; every `deposit_url` already points at the checkout, so the
   hostname, the `payment_domain_name` and `payment_route53_zone_id`
   variables, the certificate name, and the redirect route are removed, and
   `checkout_base_url` is required.
 - Terraform no longer creates the SES DKIM records. They are names under
-  `payday.sh`, whose DNS is hosted at Vercel, so they are published as the
+  `gum.money`, whose DNS is hosted at Vercel, so they are published as the
   `notification_dkim_records` output and added in Vercel DNS by hand; the
-  API's Route53 zone covers `api.payday.sh` alone.
+  API's Route53 zone covers `api.gum.money` alone.
 - The deployment runbook (`docs/production-runbook.md`) is rewritten around
   the current shape of the product: the web app (landing, checkout,
-  dashboard) on Vercel at `payday.sh`, the `api` and `indexer` services on
+  dashboard) on Vercel at `gum.money`, the `api` and `indexer` services on
   AWS, Privy, Auth0 and Resend, and the contract generation on Monad. DNS
-  stays as it is: `payday.sh` at Vercel with only `api.payday.sh` delegated
+  stays as it is: `gum.money` at Vercel with only `api.gum.money` delegated
   to Route53. The sandbox tfvars example sends email from its own subdomain
   and no longer mentions the removed `recovery_address` variable.
 - Deposits and deposit requests are the product's two primitives, and every
@@ -511,7 +569,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   and the composer, checkout, PDF, and emails speak of deposit requests,
   payers, and deposits. The Proof of Payment keeps its name and its
   versioned field names (`payment_id`, `payment_address`, the
-  `payday.invoice` snapshot schema with `bill_to`), because those are
+  `gum.invoice` snapshot schema with `bill_to`), because those are
   hash-committed and signed formats that change only with a version bump.
 - The payment address is created by the payer's wallet, not at issuance. A
   deposit request is issued without an address; once the payer's session
@@ -519,7 +577,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   or the merchant's client secret otherwise), the hosted checkout has the
   payer sign an EIP-712 `PayerAttestation` from the wallet they will pay
   from (`POST /v1/payer/payments/{id}/wallet/challenge` then `/attest`). The
-  CREATE3 salt is `keccak256("PAYDAY_SALT_V2" || attribution_hash ||
+  CREATE3 salt is `keccak256("GUM_SALT_V2" || attribution_hash ||
   attestation digest)` and the wallet is the address's recovery term, so
   `address`, `payer_wallet`, `recovery_address`, `wallet_bound_at`, and
   `self_settlement` are `null` until then and a `payment.ready` webhook
@@ -533,18 +591,18 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `PaymentFactory` and `Payment` contracts are unchanged.
 - The platform recovery wallet is gone. Overpayment remainders, expired
   balances, and late transfers return on-chain to the payer's attested
-  wallet; Payday custodies nothing. `gum-server` no longer reads
-  `PAYDAY_RECOVERY_ADDRESS`, Terraform drops `recovery_address` and the
+  wallet; Gum custodies nothing. `gum-server` no longer reads
+  `GUM_RECOVERY_ADDRESS`, Terraform drops `recovery_address` and the
   API task's precondition on it, and the `recovery` KMS key stays only as a
   legacy resource until any balance it holds is returned. The
   `recovered_funds` ledger and `payment.recovered_funds` webhook now
   describe returns to the payer.
-- Proof of Payment v2 (`payday.proof.v2`): the proof carries the payer's
+- Proof of Payment v2 (`gum.proof.v2`): the proof carries the payer's
   wallet attestation (the exact typed data signed, its digest, and the
   signature) and the recovery address, and `gum_core::verify_proof`
   checks hash → attestation → salt → CREATE3 address, that every credited
-  transfer came from the attested wallet, and a Payday attestation
-  (`payday.attestation.v2`) that names the wallet, the challenge nonce, and
+  transfer came from the attested wallet, and a Gum attestation
+  (`gum.attestation.v2`) that names the wallet, the challenge nonce, and
   the observed `facts` (`mailbox`, `merchant_session`, `wallet`) alongside
   the attribution hash, chain, and address.
 - Migration `0018_merchant_session` is renumbered `0019_merchant_session`:
@@ -560,14 +618,14 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   returns `email` and `wallet_address`. Auth0 stays for the flows that prove
   a mailbox without creating an account — payers on gated invoices and
   issuer contact addresses — which outnumber merchant sign-ups many times
-  over. `gum-server` takes `PAYDAY_PRIVY_APP_ID` (the app's public id; it
+  over. `gum-server` takes `GUM_PRIVY_APP_ID` (the app's public id; it
   verifies ES256 identity tokens against Privy's published JWKS, `iss`
-  `privy.io`, `aud` the app) and no longer reads `PAYDAY_AUTH0_ISSUER`,
-  `PAYDAY_AUTH0_AUDIENCE`, `PAYDAY_AUTH0_CLIENT_ID`, or
-  `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`; the payer `PAYDAY_PAYER_AUTH0_*`
+  `privy.io`, `aud` the app) and no longer reads `GUM_AUTH0_ISSUER`,
+  `GUM_AUTH0_AUDIENCE`, `GUM_AUTH0_CLIENT_ID`, or
+  `GUM_DASHBOARD_AUTH0_CLIENT_ID`; the payer `GUM_PAYER_AUTH0_*`
   settings are unchanged. Terraform takes `privy_app_id` and drops
   `auth0_audience`, `auth0_client_id`, and `dashboard_auth0_client_id`; the
-  Auth0 `Payday Dashboard` application (`auth0/dashboard.tf`) is gone.
+  Auth0 `Gum Dashboard` application (`auth0/dashboard.tf`) is gone.
 - API keys are managed from the dashboard session alone. `POST` and `DELETE
   /v1/account/api-key` take the same bearer the session reads with and refuse
   an API key (`identity_unauthorized`); the five-minute fresh-OTP step-up and
@@ -576,8 +634,8 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   a signed-in account exists at generation 1 before it holds a key — and the
   SDK's `account.issueApiKey(expectedGeneration)` and
   `account.revokeApiKey(expectedGeneration)` no longer take a separate token.
-  The CLI's `payday login` is no longer accepted by the API.
-- Deposit requests settle to the account's Payday wallet by default. The
+  The CLI's `gum login` is no longer accepted by the API.
+- Deposit requests settle to the account's Gum wallet by default. The
   composer and the onboarding walkthrough preselect it; an identity's saved
   wallets are offered as alternatives when it has any, and setting up an
   identity no longer asks for one — a proven contact mailbox is all it needs.
@@ -589,13 +647,13 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   stand-in — the dashboard signs in against the real development app even
   locally — and `scripts/e2e-anvil.sh` does the same instead of driving the
   CLI's login. The browser suite swaps the Privy SDK for `web/test/privy-stub.tsx`
-  at bundle time (`PAYDAY_PRIVY_STUB=1`).
+  at bundle time (`GUM_PRIVY_STUB=1`).
 
 ### Removed
 
 - Identity verification. The `verified_identity` and
   `verified_identity_unattributed` payer modes, the `expected_identity`
-  assertion, the Didit provider and its `PAYDAY_DIDIT_*` settings, the
+  assertion, the Didit provider and its `GUM_DIDIT_*` settings, the
   hosted identity step in the checkout, `POST …/verify/identity/start`,
   `POST /v1/webhooks/identity`, the reconciler, credential reuse, manual
   review (`POST …/verification/review`,
@@ -605,9 +663,9 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `requirements` carries `email` and `complete`. Migration `0017` drops the
   identity tables and columns, along with any pre-production rows only those
   modes could have produced.
-- The `payday` command-line client (`crates/gateway-cli`), its installer,
+- The `gum` command-line client (`crates/gateway-cli`), its installer,
   Homebrew formula generator, release workflow, and reference documentation.
-  Payday is API-first with the dashboard for management: every command had an
+  Gum is API-first with the dashboard for management: every command had an
   API route or a dashboard control behind it, and those remain. The offline
   Proof of Payment checks the CLI itemised live on in
   `gum_core::verify_proof`; the CLI's optional live receipt checks over
@@ -648,9 +706,9 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `POST /v1/payer/payments/{id}/verify/email/start` (the gateway sends the
   code; the request names no email) and `…/verify/email/confirm` (the code),
   exchanged against a dedicated Auth0 payer audience
-  (`auth0/actions/payday-payer-email-otp.js`). `start` mints an opaque payer
+  (`auth0/actions/gum-payer-email-otp.js`). `start` mints an opaque payer
   session, stored hashed and valid for 24 hours, that travels in
-  `Payday-Payer-Session` on every payer read and unlocks exactly that
+  `Gum-Payer-Session` on every payer read and unlocks exactly that
   invoice's content, QR, and attachment for that session; `GET …/verify`
   reports the session's facts. One code per invoice per minute
   (`429 otp_resend_cooldown` with `Retry-After`); permissionless invoices
@@ -658,10 +716,10 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   `verified_email` the invoice's `verification_completed_at` is set in the
   same transaction.
   The write routes answer cross-origin requests from the hosted checkout only
-  (`PAYDAY_HOSTED_CHECKOUT_ORIGIN`); the reads keep `*` and now admit the
-  session header. Configured by `PAYDAY_PAYER_AUTH0_ISSUER`,
-  `PAYDAY_PAYER_AUTH0_AUDIENCE`, `PAYDAY_PAYER_AUTH0_CLIENT_ID`, and
-  `PAYDAY_PAYER_REF_MASTER_KEY` (the merchant-scoped payer reference key).
+  (`GUM_HOSTED_CHECKOUT_ORIGIN`); the reads keep `*` and now admit the
+  session header. Configured by `GUM_PAYER_AUTH0_ISSUER`,
+  `GUM_PAYER_AUTH0_AUDIENCE`, `GUM_PAYER_AUTH0_CLIENT_ID`, and
+  `GUM_PAYER_REF_MASTER_KEY` (the merchant-scoped payer reference key).
 - Verification gate on settlement: the sweep claim itself, in SQL, admits a
   live `funded` invoice only when its policy is permissionless or its
   verification has completed and the finalized chain clock has not passed
@@ -679,7 +737,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 - SDK: `payer.verification.startEmail/confirmEmail/status` and
   `payer.payments.qr(id, payerSession)` returning a `Blob`. `qrUrl` is gone:
   a gated invoice's QR needs a session, which must never be in an image URL.
-- The development identity provider serves a `payday-payer-local` client and
+- The development identity provider serves a `gum-payer-local` client and
   audience next to the merchant ones; `just dev` and `just e2e` configure
   the payer settings against it.
 
@@ -709,44 +767,44 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   are deleted, unattached ones expire after seven days, and an upload that
   expired unused is refused at issuance with `attachment_not_ready`.
 - `GET /v1/payments/{id}/attachment` (a short-lived signed download),
-  `GET /v1/payments/{id}/invoice.pdf` (a deterministic Payday-rendered
+  `GET /v1/payments/{id}/invoice.pdf` (a deterministic Gum-rendered
   summary), and `GET /v1/payments/{id}/proof`.
 - Proof of Payment: for a settled invoice, the canonical issuance snapshot,
   nonce, attribution hash, salt, chain, factory, token and payment addresses,
   every credited transfer, the fulfilment transaction as
-  `settlement_transaction_hash`, and a Payday-signed verification attestation
+  `settlement_transaction_hash`, and a Gum-signed verification attestation
   whose payload names the invoice's `attribution_hash`, `chain_id`, and
   `payment_address`, so it cannot be transplanted onto another proof.
   Verifiers recompute hash → salt → address, check the attachment and the
   attestation, and require the transfers to sum to at least the invoice
-  amount; `payday proof verify --rpc-url` also checks each transfer's receipt
+  amount; `gum proof verify --rpc-url` also checks each transfer's receipt
   and the settlement receipt on chain.
-- CLI: `payday create` takes `--issuer`, `--bill-to`, `--heading`, and
+- CLI: `gum create` takes `--issuer`, `--bill-to`, `--heading`, and
   `--reference`, or the whole API body with `--from-file`, and uploads a PDF
-  with `--attachment` (waiting for the scan before issuing); `payday get
-  --pdf` saves the invoice PDF; `payday customers create|get|list`; and
-  `payday proof download|verify`.
-- The merchant dashboard at `payday.sh/dashboard`: invoices, customers, and
+  with `--attachment` (waiting for the scan before issuing); `gum get
+  --pdf` saves the invoice PDF; `gum customers create|get|list`; and
+  `gum proof download|verify`.
+- The merchant dashboard at `gum.money/dashboard`: invoices, customers, and
   attachment upload with scan progress. It signs in with the same emailed
   code as the CLI, and the API accepts the resulting short-lived identity
   token as a session credential on the payment, customer, and attachment
   routes, so no API key ever reaches a browser. `gum-server` reads
-  `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID` to admit it.
+  `GUM_DASHBOARD_AUTH0_CLIENT_ID` to admit it.
 - Gated payer responses: for the verified policies the payer route returns
   only the issuer name, heading, requirements, and a masked expected mailbox
   until verification completes; the amount, address, invoice content, and the
   settlement transaction hash and explorer link stay `null` while locked.
-- Environment: `PAYDAY_ATTACHMENT_BUCKET`, `PAYDAY_ATTACHMENT_S3_ENDPOINT`,
-  `PAYDAY_ATTACHMENT_S3_FORCE_PATH_STYLE`, and
-  `PAYDAY_ATTACHMENT_DOWNLOAD_TTL_SECS` for the attachment store; exactly one
-  of `PAYDAY_ATTESTATION_SIGNER_KEY` or `PAYDAY_ATTESTATION_KMS_KEY_ID` for
-  the attestation signer; `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`; and, for the
+- Environment: `GUM_ATTACHMENT_BUCKET`, `GUM_ATTACHMENT_S3_ENDPOINT`,
+  `GUM_ATTACHMENT_S3_FORCE_PATH_STYLE`, and
+  `GUM_ATTACHMENT_DOWNLOAD_TTL_SECS` for the attachment store; exactly one
+  of `GUM_ATTESTATION_SIGNER_KEY` or `GUM_ATTESTATION_KMS_KEY_ID` for
+  the attestation signer; `GUM_DASHBOARD_AUTH0_CLIENT_ID`; and, for the
   web app, `NEXT_PUBLIC_AUTH0_DOMAIN`, `NEXT_PUBLIC_AUTH0_CLIENT_ID`,
   `NEXT_PUBLIC_AUTH0_AUDIENCE`, and `NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN`.
-- `recovery_address` on the merchant payment response: the Payday recovery
+- `recovery_address` on the merchant payment response: the Gum recovery
   wallet each payment is committed to. The payer response does not carry it.
 - The `recovered_funds` ledger also records recoveries performed by executions
-  Payday did not submit: when a third party settles or recovers a payment
+  Gum did not submit: when a third party settles or recovers a payment
   directly on-chain, the indexer takes what the contract routed to the
   recovery wallet from the payment's own events and writes the same ledger row
   and `payment.recovered_funds` event it would for its own sweep.
@@ -759,11 +817,11 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   vocabulary gains `verification.approved`, `verification.declined`, and
   `payment.likely_unsolicited`.
 - Deployment code-hash pinning: `gum-server` and the indexer require
-  `PAYDAY_FACTORY_CODE_HASH` and `PAYDAY_BATCH_SWEEPER_CODE_HASH` (keccak256 of
+  `GUM_FACTORY_CODE_HASH` and `GUM_BATCH_SWEEPER_CODE_HASH` (keccak256 of
   the deployed runtime bytecode), compare them with the chain at startup,
   verify `BatchSweeper.factory()`, and refuse to start on a mismatch.
-  `gum-server` therefore also reads `PAYDAY_RPC_URL` and
-  `PAYDAY_BATCH_SWEEPER_ADDRESS`; a status-only instance skips all of this.
+  `gum-server` therefore also reads `GUM_RPC_URL` and
+  `GUM_BATCH_SWEEPER_ADDRESS`; a status-only instance skips all of this.
   `just dev` and `just e2e` compute the hashes from the running chain, and
   Terraform gains `factory_code_hash`, `batch_sweeper_code_hash`, and
   `recovery_address` plus a recovery KMS key that no task role can sign with.
@@ -772,11 +830,11 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   verification reviews, identity webhook receipts, and the attribution columns,
   landing ahead of the features that use them, along with an
   immutable-issuance trigger on invoices.
-- A `payday.sh` web project (`web/`): a landing page and the hosted checkout at
+- A `gum.money` web project (`web/`): a landing page and the hosted checkout at
   `/pay/{id}`, built with Next.js, Tailwind, and wagmi. The checkout is
   server-rendered, so it arrives complete, and a payer can pay from a connected
   wallet, a scanned QR, or a copied address.
-- `PaydayPayerClient` in the TypeScript SDK — a keyless client for the public
+- `GumPayerClient` in the TypeScript SDK — a keyless client for the public
   payer routes, so a merchant can build a checkout of their own.
 - `Access-Control-Allow-Origin: *` on `GET /v1/payer/payments/{id}` and its
   `/qr`. No other route allows cross-origin reads.
@@ -900,15 +958,15 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 
 ### Changed
 
-- `PAYDAY_AUTH0_CLIENT_ID` now names the `Payday Dashboard` single-page
+- `GUM_AUTH0_CLIENT_ID` now names the `Gum Dashboard` single-page
   application, the one merchant client `gum-server` accepts: its tokens are the
   session credential and, while fresh, the credential that issues an API key.
-  `PAYDAY_DASHBOARD_AUTH0_CLIENT_ID`, the Terraform variable
+  `GUM_DASHBOARD_AUTH0_CLIENT_ID`, the Terraform variable
   `dashboard_auth0_client_id`, and the Auth0 Action secret
-  `PAYDAY_DASHBOARD_CLIENT_ID` are gone; the Action admits only
-  `PAYDAY_CLIENT_ID`. Deployments must point `PAYDAY_AUTH0_CLIENT_ID` and
-  `PAYDAY_CLIENT_ID` at the dashboard application and may delete the
-  `Payday CLI` Native application from the tenant.
+  `GUM_DASHBOARD_CLIENT_ID` are gone; the Action admits only
+  `GUM_CLIENT_ID`. Deployments must point `GUM_AUTH0_CLIENT_ID` and
+  `GUM_CLIENT_ID` at the dashboard application and may delete the
+  `Gum CLI` Native application from the tenant.
 - `just seed` and the end-to-end suite create local accounts through
   `scripts/local-api-key.sh`, the same three-call email-OTP exchange the
   dashboard's API key section makes, and print the key once.
@@ -921,36 +979,36 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   is the only way in — it always was the same exchange — and anyone reaching a
   dashboard route without a live session, or signing out, lands on the landing
   page rather than on a second sign-in form.
-- `payday-dev-identity` issues access tokens good for 24 hours rather than 5
+- `gum-dev-identity` issues access tokens good for 24 hours rather than 5
   minutes, matching Auth0's default for a resource server. The dashboard
   session is exactly the token's lifetime because nothing refreshes it, so the
   old value signed a merchant out mid-invoice; the five-minute freshness that
   API-key issuance demands is a separate window and is unchanged.
-- `PAYDAY_DEV_IDENTITY_OTP` fixes the code the local provider emails, so
+- `GUM_DEV_IDENTITY_OTP` fixes the code the local provider emails, so
   signing in during development does not mean reading it out of the runner's
   log.
 - `issuer`, `bill_to`, and `payer_policy` are required on `POST /v1/payments`;
   a body without them is rejected. An issued invoice is immutable.
 - An emailed one-time code is good for five minutes rather than three, in the
-  Auth0 passwordless connection, in its email, and in `payday-dev-identity`,
+  Auth0 passwordless connection, in its email, and in `gum-dev-identity`,
   which previously kept codes until they were used and now refuses and
   discards an expired one.
 - Cross-origin access to the merchant routes (payments, customers,
   issuers, attachments) is allowed from the configured web origin only
-  (`PAYDAY_PUBLIC_BASE_URL`) for `GET`, `POST`, `PATCH`, `PUT`, and `DELETE`
+  (`GUM_PUBLIC_BASE_URL`) for `GET`, `POST`, `PATCH`, `PUT`, and `DELETE`
   with the
   `Authorization`, `Content-Type`, `Idempotency-Key`, and `Accept` headers;
   the payer `GET` routes remain open to any origin.
 - Settlement is exact: a live `Payment` deployment transfers exactly the
-  invoice amount to the payout address and any remainder to the Payday
+  invoice amount to the payout address and any remainder to the Gum
   recovery wallet (`Settled` then `Recovered`), reverts when underfunded, and
   still sends the whole balance to recovery once expired. `PaymentFactory` and
   `BatchSweeper` are redeployed together as a new generation; their interfaces
   and the address formula are unchanged.
-- Recovery is platform-controlled. `gum-server` reads `PAYDAY_RECOVERY_ADDRESS`
+- Recovery is platform-controlled. `gum-server` reads `GUM_RECOVERY_ADDRESS`
   and stamps it on every payment; merchants can no longer choose where
   overpayments, expired balances, or late transfers go. Recovered funds are
-  held by Payday, reviewed manually, and returned by the operator. Payday takes
+  held by Gum, reviewed manually, and returned by the operator. Gum takes
   custody of recovered amounts only; the intended invoice amount still moves
   directly to the merchant, and user-facing copy now says so.
 - The payer link is tokenless and unauthenticated. Anyone holding it may read
@@ -962,7 +1020,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 - Payments are looked up by their complete ID or payment address; ID prefixes
   are no longer accepted.
 - The checkout's receipt says exactly the invoice amount reached the merchant,
-  and a settled overpayment tells the payer the remainder went to the Payday
+  and a settled overpayment tells the payer the remainder went to the Gum
   recovery wallet; the received state says the invoice amount, not the
   balance, is being settled. Terraform's `recovery_address` fails closed: it
   defaults to null and the API task definition refuses to plan until it is set
@@ -975,7 +1033,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   Use `reference` for the invoice number and `notes` for free text.
 - `refund_address` from `POST /v1/payments` (a body carrying it is rejected as
   an unknown field), from `CreatePayment` in the TypeScript SDK, and
-  `--refund-to` from `payday create`. The merchant response field
+  `--refund-to` from `gum create`. The merchant response field
   `refund_address` is renamed to `recovery_address`.
 - The placeholder checkout that was compiled into the gateway binary, along with
   its `/assets/payer.*` routes.
@@ -1021,7 +1079,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
   settlement.
 - Customer lifecycle reporting for awaiting, partial, paid, settled, expired,
   returned, and attention states, with payout-support guidance.
-- A `payday` CLI with email-OTP login, private endpoint-bound credentials,
+- A `gum` CLI with email-OTP login, private endpoint-bound credentials,
   payment tracking/watch mode, key rotation/revocation, webhook management,
   JSON output, completions, built-in guides, and verified upgrades.
 - OpenAPI 3.1 and interactive API references, a zero-runtime-dependency
@@ -1041,7 +1099,7 @@ pre-release software; the `0.1.0` version does not imply a stable public API.
 ### Known limitations
 
 - This is an initial pre-release; compatibility is not yet guaranteed.
-- Payday does not initiate payer refunds. Cancellation is advisory and the
+- Gum does not initiate payer refunds. Cancellation is advisory and the
   merchant controls the payment's refund address.
 - Accounts have one unscoped, unnamed key generation and no team/organization
   membership or source-IP restrictions.

@@ -9,7 +9,7 @@ Base, and Arbitrum One and USDT (Tether's USDT0) on Monad and Arbitrum One.
 All runbooks assume you have set up your shell environment:
 
 ```bash
-export AWS_PROFILE=payday
+export AWS_PROFILE=gum
 export AWS_REGION=eu-north-1
 export MONAD_RPC_URL='https://your-quicknode-monad-endpoint'
 export BASE_RPC_URL='https://your-quicknode-base-endpoint'

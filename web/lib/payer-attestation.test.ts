@@ -13,7 +13,7 @@ import { payerAttestationDefinition } from "./payer-attestation";
 const TYPED: PayerAttestationTypedData = {
   domain: {
     name: "Gum",
-    version: "1",
+    version: "2",
     chainId: 143,
     verifyingContract: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
   },
@@ -35,7 +35,7 @@ const TYPED: PayerAttestationTypedData = {
   },
   message: {
     statement:
-      "I control this wallet and will pay this Gum deposit request from it. Only transfers from this wallet count toward the request, and any funds Gum returns go back to it.",
+      "I control this wallet and will pay this Gum deposit request from it. Only transfers from this wallet count toward the request.",
     attributionHash: "0x8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a8a",
     // The wallet of the secp256k1 key 0x0707…07, as gateway-core's test signs.
     wallet: "0x4a62316623ad457F02cDC5D997deD67a383EC569",
@@ -47,7 +47,7 @@ const TYPED: PayerAttestationTypedData = {
 describe("payerAttestationDefinition", () => {
   it("hashes to the digest gateway-core pins for the same document", () => {
     expect(hashTypedData(payerAttestationDefinition(TYPED))).toBe(
-      "0xc55420e71bf84f9530d88c39ca101708dc8426be79b5432b4f636910c6909743",
+      "0xdf86ba58be5c6f1988b5835a63c26ab6ebd00f02b11b975af4fa5e473227a32e",
     );
   });
 

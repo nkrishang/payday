@@ -10,10 +10,10 @@ export const metadata: Metadata = {
 };
 
 const PROOF = `{
-  "version": "gum.proof.v4",
+  "version": "gum.proof.v5",
   "payment_id": "dr_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "canonical_issuance_snapshot": {
-    "schema": "gum.invoice.v4",
+    "schema": "gum.invoice.v5",
     "canonicalization": "RFC8785",
     "issuer": { "name": "Acme LLC", "email": "billing@acme.example" },
     "bill_to": { "name": "Customer Inc" },
@@ -24,20 +24,21 @@ const PROOF = `{
     "reference": "INV-1042",
     "notes": null,
     "expiration_timestamp": "1757160000",
-    "payer_policy": { "mode": "verified_email", "expected_email": "alice@customer.example" },
+    "payer_verification": { "email": { "expected_email": "alice@customer.example" }, "wallet_attestation": false },
     "attachment": { "id": "0198f80c-…", "byte_length": "48211", "sha256": "0x9f…" },
     "networks": [
       { "chain_id": "143", "token_address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "factory_address": "0x…" },
       { "chain_id": "8453", "token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "factory_address": "0x…" },
       { "chain_id": "42161", "token_address": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "factory_address": "0x…" }
     ],
-    "receiver_address": "0x1111111111111111111111111111111111111111"
+    "receiver_address": "0x1111111111111111111111111111111111111111",
+    "recovery_address": "0x…"
   },
   "canonicalization": "RFC8785",
   "attribution_hash": "0x…",
   "payer_wallet": {
     "address": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
-    "typed_data": { "domain": { "name": "Gum", "version": "1", "…": "…" }, "…": "…" },
+    "typed_data": { "domain": { "name": "Gum", "version": "2", "…": "…" }, "…": "…" },
     "digest": "0x…",
     "signature": "0x…",
     "method": "ecdsa"
@@ -47,7 +48,7 @@ const PROOF = `{
   "factory_address": "0x…",
   "payment_address": "0x2222222222222222222222222222222222222222",
   "token_address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
-  "recovery_address": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+  "recovery_address": "0x…",
   "settlement_transaction_hash": "0x…",
   "transfers": [
     {
@@ -61,14 +62,15 @@ const PROOF = `{
   ],
   "verification": {
     "payload": {
-      "version": "1",
+      "version": "gum.attestation.v5",
       "payment_id": "dr_0198f80c-…",
+      "scope": "wallet_attributed",
       "attribution_hash": "0x…",
+      "issuance_nonce": "0x…",
       "chain_id": "143",
       "payment_address": "0x2222…",
       "payer_wallet": "0x5aAe…",
       "wallet_nonce": "0x…",
-      "payer_policy_mode": "verified_email",
       "result": "approved",
       "verified_at": "2026-09-01T11:58:00Z",
       "wallet_bound_at": "2026-09-01T11:58:30Z",
@@ -169,7 +171,7 @@ export default function ProofPage() {
           </tr>
           <tr>
             <td>recovery_address</td>
-            <td>Always the attested wallet.</td>
+            <td>Always Gum&apos;s own recovery wallet, the snapshot&apos;s recovery term.</td>
           </tr>
           <tr>
             <td>transfers</td>
@@ -224,8 +226,8 @@ export default function ProofPage() {
         <Step title="Recompute the salt and the address">
           <p>
             Derive the salt from the hash and the digest, then the address from the factory, the
-            salt, and the terms in the snapshot with the wallet as the recovery term. It must equal{" "}
-            <code>payment_address</code>.
+            salt, and the terms in the snapshot, whose recovery term is Gum&apos;s own recovery
+            wallet. It must equal <code>payment_address</code>.
           </p>
         </Step>
         <Step title="Check the transfers">

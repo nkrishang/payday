@@ -21,7 +21,7 @@ const EMAIL_ATTEMPT: VerificationAttempt = {
 };
 
 const VERIFIED: VerificationDetail = {
-  payer_policy_mode: "verified_email",
+  verification: { email: { expected_email: "onboarding@gum.money" }, wallet_attestation: false },
   verification_completed_at: "2026-08-25T10:05:00Z",
   likely_unsolicited_at: null,
   facts: { email: "approved", wallet: "pending", merchant_session: "not_required", complete: true },
@@ -63,7 +63,7 @@ describe("VerificationActivity", () => {
 
   it("describes a merchant-session exchange as the app opening the request", async () => {
     renderActivity({
-      payer_policy_mode: "merchant_session",
+      verification: { merchant_auth: { payer_reference: "user_123" }, wallet_attestation: false },
       verification_completed_at: "2026-08-25T10:05:00Z",
       likely_unsolicited_at: null,
       facts: { email: "not_required", wallet: "pending", merchant_session: "approved", complete: true },

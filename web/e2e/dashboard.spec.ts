@@ -101,9 +101,15 @@ test("a settled invoice offers its PDF, its Proof of Payment, and its recovered 
   const proof = await proofDownload;
   expect(proof.suggestedFilename()).toBe("INV-1042-proof.json");
   const body = JSON.parse((await streamToString(proof)) ?? "");
-  expect(body.version).toBe("gum.proof.v4");
+  expect(body.version).toBe("gum.proof.v5");
+  // The seed's payer completed the wallet attestation add-on, so the proof
+  // attributes the transfers to that wallet.
+  expect(body.scope).toBe("wallet_attributed");
   expect(body.payer_wallet.typed_data.primaryType).toBe("PayerAttestation");
-  expect(body.recovery_address).toBe(body.payer_wallet.address);
+  // Recovery is Gum's own wallet now, never the payer's.
+  expect(body.recovery_address).not.toBe(body.payer_wallet.address);
+  expect(body.recovery_address).toMatch(/^0x[0-9a-fA-F]{40}$/);
+  expect(body.issuance_nonce).toMatch(/^0x[0-9a-f]{64}$/);
   expect(body.payment_id).toBe("dr_seed-settled");
   expect(body.canonical_issuance_snapshot.attachment.sha256).toMatch(/^0x[0-9a-f]{64}$/);
   expect(body.verification.signer).toBe("0x976EA74026E726554dB657fA54763abd0C3a0aa9");

@@ -1,12 +1,14 @@
 //! The payer's wallet attestation: an EIP-712 signature, made in the payer's
-//! session once the deposit request's policy is satisfied, from the wallet
-//! they will pay from. It is what binds a person who passed the policy to a
-//! wallet, and it is committed into the payment address: the CREATE3 salt is
-//! derived from the attribution hash and this attestation's signing digest,
-//! and the wallet is the address's recovery term (see [`crate::Invoice`]).
+//! session once the deposit request's other verification add-ons are
+//! satisfied, from the wallet they will pay from. It is what binds a person
+//! who passed those add-ons to a wallet, and it is committed into the
+//! payment address: the CREATE3 salt is derived from the attribution hash
+//! and this attestation's signing digest (see [`crate::Invoice`]). It says
+//! nothing about the address's recovery term, which is always Gum's own
+//! recovery wallet.
 //!
 //! ```text
-//! domain  = EIP712Domain{name: "Gum", version: "1", chainId, verifyingContract: factory}
+//! domain  = EIP712Domain{name: "Gum", version: "2", chainId, verifyingContract: factory}
 //! message = PayerAttestation{statement, attributionHash, wallet, nonce, expiresAt}
 //! digest  = keccak256(0x1901 || domainSeparator || hashStruct(message))
 //! ```
@@ -24,11 +26,11 @@ use thiserror::Error;
 
 /// EIP-712 domain name and version. A new message shape means a new version.
 pub const PAYER_ATTESTATION_DOMAIN_NAME: &str = "Gum";
-pub const PAYER_ATTESTATION_DOMAIN_VERSION: &str = "1";
+pub const PAYER_ATTESTATION_DOMAIN_VERSION: &str = "2";
 pub const PAYER_ATTESTATION_PRIMARY_TYPE: &str = "PayerAttestation";
 /// The sentence the payer signs. It is part of the signed bytes, so a wallet
 /// that renders typed data shows the payer exactly what they are agreeing to.
-pub const PAYER_ATTESTATION_STATEMENT: &str = "I control this wallet and will pay this Gum deposit request from it. Only transfers from this wallet count toward the request, and any funds Gum returns go back to it.";
+pub const PAYER_ATTESTATION_STATEMENT: &str = "I control this wallet and will pay this Gum deposit request from it. Only transfers from this wallet count toward the request.";
 /// The one signature method verifiable offline.
 pub const PAYER_ATTESTATION_METHOD_ECDSA: &str = "ecdsa";
 
@@ -367,7 +369,7 @@ mod tests {
         let message = message();
         assert_eq!(
             message.digest(CHAIN, FACTORY).to_string(),
-            "0xc55420e71bf84f9530d88c39ca101708dc8426be79b5432b4f636910c6909743"
+            "0xdf86ba58be5c6f1988b5835a63c26ab6ebd00f02b11b975af4fa5e473227a32e"
         );
         let typed = message.typed_data(CHAIN, FACTORY);
         let json = serde_json::to_value(&typed).unwrap();

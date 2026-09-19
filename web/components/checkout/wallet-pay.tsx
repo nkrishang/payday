@@ -35,10 +35,11 @@ const ZERO = "0x0000000000000000000000000000000000000000" as const;
  *    this deployment's configured values before the button will do anything,
  *    so a wrong or tampered response cannot get a signature for an
  *    unexpected token, and the wallet is switched to that chain first.
- * 3. The connected wallet must be the one the payer attested. The address
- *    commits to that wallet and the indexer credits only its transfers, so
- *    the button refuses to send from any other rather than let money arrive
- *    that will not count.
+ * 3. When the wallet attestation add-on is attached, the connected wallet must be the
+ *    one the payer attested. The address commits to that wallet and the indexer
+ *    credits only its transfers, so the button refuses to send from any other
+ *    rather than let money arrive that will not count. Without the add-on
+ *    (`payer_wallet` is null) any connected wallet may pay.
  */
 export function WalletPay({
   payment,
@@ -70,7 +71,10 @@ export function WalletPay({
   const supported = configured !== null && target !== null && tokenMatches;
   const targetId = target?.id ?? 0;
   const walletMatches =
-    !isConnected || !address || address.toLowerCase() === payment.payer_wallet.toLowerCase();
+    payment.payer_wallet === null ||
+    !isConnected ||
+    !address ||
+    address.toLowerCase() === payment.payer_wallet.toLowerCase();
 
   const usdc = useReadContract({
     address: payment.token.address as Hex,
@@ -203,7 +207,7 @@ export function WalletPay({
         </div>
       ) : null}
 
-      {isConnected && !walletMatches ? (
+      {isConnected && payment.payer_wallet !== null && !walletMatches ? (
         <p role="alert" className="mt-2.5 text-center text-[13px] text-warning">
           This request is bound to{" "}
           <span className="font-mono">{truncateAddress(payment.payer_wallet)}</span>. Switch to

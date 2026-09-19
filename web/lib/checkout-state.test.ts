@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { lockedDepositRequest, merchantSessionDepositRequest, payment, unboundDepositRequest } from "@/test/fixtures";
+import {
+  lockedDepositRequest,
+  merchantSessionDepositRequest,
+  networkChoiceDepositRequest,
+  payment,
+  unattestedPayment,
+  unboundDepositRequest,
+} from "@/test/fixtures";
 import { checkoutView, isTerminalStatus, readyDepositRequest, unlockedDepositRequest } from "./checkout-state";
 
 const open = { secondsRemaining: 3_600, pendingPayment: null };
@@ -92,8 +99,8 @@ describe("checkoutView", () => {
     );
     expect(view.phase).toBe("settled");
     expect(view.detail).toMatch(/Exactly the requested amount reached the merchant/);
-    expect(view.detail).toMatch(/above the requested amount went back to the wallet you signed with/);
-    expect(view.detail).not.toMatch(/recovery wallet|Gum support|refund/i);
+    expect(view.detail).toMatch(/above the requested amount went back to Gum's recovery wallet/);
+    expect(view.detail).not.toMatch(/wallet you signed with|Gum support|refund/i);
   });
 
   it("asks for the wallet signature before offering any address", () => {
@@ -107,6 +114,14 @@ describe("checkoutView", () => {
     expect(checkoutView(unboundDepositRequest(), { ...open, secondsRemaining: 0 }).phase).toBe("closing");
     // A bound request never shows the step.
     expect(checkoutView(payment(), open).showWalletStep).toBe(false);
+  });
+
+  it("asks only for a network choice when no add-on attests the wallet", () => {
+    const view = checkoutView(networkChoiceDepositRequest(), open);
+    expect(view.phase).toBe("network_required");
+    expect(view.showWalletStep).toBe(false);
+    expect(view.showInstructions).toBe(false);
+    expect(view.detail).toMatch(/pay from any wallet/);
   });
 
   it("follows a delivery through Relay after the deposit was reported", () => {
@@ -174,14 +189,14 @@ describe("checkoutView", () => {
       open,
     );
     expect(funded.phase).toBe("expired_funded");
-    expect(funded.detail).toMatch(/back to the wallet you signed with/);
-    expect(funded.detail).not.toMatch(/Gum support|recovery wallet/);
+    expect(funded.detail).toMatch(/back to Gum's recovery wallet/);
+    expect(funded.detail).not.toMatch(/Gum support|wallet you signed with/);
   });
 
   it("says plainly where returned funds went", () => {
     const view = checkoutView(payment({ status: "returned", payable: false }), open);
     expect(view.phase).toBe("returned");
-    expect(view.detail).toMatch(/back to the wallet you signed with/);
+    expect(view.detail).toMatch(/back to Gum's recovery wallet/);
   });
 
   it("never calls the recovery wallet a refund address", () => {
@@ -281,8 +296,8 @@ describe("checkoutView for a gated deposit request", () => {
     expect(opening.tone).toBe("progress");
     expect(opening.showInstructions).toBe(false);
 
-    // A code sent in this tab means nothing for this mode; the API's own
-    // completion without a session does not open it either.
+    // A code sent in this tab means nothing for this mode; a locked response
+    // that claims completion without this tab's session is gated afresh.
     expect(checkoutView(merchantSessionDepositRequest(), { ...open, emailCodeSent: true }).phase).toBe(
       "app_required",
     );
@@ -298,7 +313,7 @@ describe("checkoutView for a gated deposit request", () => {
         }),
         open,
       ).phase,
-    ).toBe("app_required");
+    ).toBe("verification_required");
   });
 
   it("still asks the bare link to verify after another session completed the deposit request", () => {
@@ -335,13 +350,15 @@ describe("unlockedDepositRequest", () => {
 
   it("keeps an unbound request unlocked but not ready", () => {
     // The address is a second gate: content without an address is the
-    // wallet step, not a hole.
+    // wallet or network step, not a hole.
     const unlocked = unlockedDepositRequest(unboundDepositRequest());
     expect(unlocked).not.toBeNull();
     expect(readyDepositRequest(unlocked!)).toBeNull();
     expect(readyDepositRequest(payment())?.address).toBe("0x9a3f0000000000000000000000000000000000c2");
-    // The two arrive together or not at all.
-    expect(readyDepositRequest(payment({ payer_wallet: null } as never))).toBeNull();
+    // The address no longer waits for a wallet: without the attestation
+    // add-on a request with a network and an address is ready, and the
+    // payer may pay from any wallet.
+    expect(readyDepositRequest(unattestedPayment())?.payer_wallet).toBeNull();
   });
 });
 

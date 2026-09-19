@@ -21,8 +21,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use gum_core::{
-    Invoice, InvoiceStatus, PayerPolicyMode, VerificationRequirementsResponse, deposit_request_id,
-    rfc3339,
+    Invoice, InvoiceStatus, VerificationRequirementsResponse, deposit_request_id, rfc3339,
 };
 use gum_ledger::{
     AccountId, CLIENT_SECRET_PREFIX, CLIENT_SECRET_TTL, ExchangeClientSecretError,
@@ -74,13 +73,16 @@ pub(crate) fn openable(row: &gum_ledger::DbInvoice, invoice: &Invoice) -> bool {
 }
 
 fn merchant_session_only(invoice: &Invoice) -> Result<(), ApiError> {
-    match invoice.issuance_snapshot.payer_policy.mode() {
-        PayerPolicyMode::MerchantSession => Ok(()),
-        PayerPolicyMode::Permissionless => Err(ApiError::verification_not_required()),
-        PayerPolicyMode::VerifiedEmail => Err(ApiError::verification_method_not_applicable(
-            "This deposit request verifies the payer by email; client secrets apply to merchant_session deposit requests",
-        )),
+    let verification = &invoice.issuance_snapshot.payer_verification;
+    if verification.merchant_auth.is_some() {
+        return Ok(());
     }
+    if verification.email.is_some() {
+        return Err(ApiError::verification_method_not_applicable(
+            "This deposit request verifies the payer by email; client secrets apply to deposit requests with the merchant-auth add-on",
+        ));
+    }
+    Err(ApiError::verification_not_required())
 }
 
 /// Mint a client secret for a merchant-session invoice the merchant owns.
@@ -159,7 +161,7 @@ pub async fn exchange(
             payer_session: exchange.token,
             expires_at: rfc3339(exchange.session.expires_at),
             requirements: VerificationRequirementsResponse::from_facts(
-                PayerPolicyMode::MerchantSession,
+                &invoice.issuance_snapshot.payer_verification,
                 exchange.session.facts(),
             ),
         }),

@@ -354,14 +354,11 @@ moved {
   to   = aws_kms_alias.signer[0]
 }
 
-# Retained for any balance recovered under the pre-2026-09 scheme, in which
-# this wallet was every payment's recovery term. Payments now return excess
-# and late funds to the payer's own attested wallet, so nothing new lands
-# here and gum-server no longer reads its address; remove it once the balance
-# is confirmed empty (it carries prevent_destroy, see the README).
-# The recovery wallet takes custody of overpayment remainders, expired
-# balances, and late transfers. Nothing in the stack signs with it: recovered
-# funds are reviewed and returned by hand, so no task role is granted kms:Sign.
+# Gum's dedicated recovery wallet: the recovery term committed into every
+# deposit address, whatever verification the payer completed. Nothing in the
+# stack signs with it: recovered funds (overpayment remainders, expired
+# balances, late transfers) are reviewed and returned by hand, so no task
+# role is granted kms:Sign.
 resource "aws_kms_key" "recovery" {
   description              = "Gum recovery wallet; manual operator use only"
   key_usage                = "SIGN_VERIFY"
@@ -771,7 +768,8 @@ resource "aws_ecs_task_definition" "api" {
       { name = "GUM_PUBLIC_BASE_URL", value = local.checkout_base_url },
       { name = "GUM_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
       { name = "GUM_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
-      { name = "GUM_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn }
+      { name = "GUM_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn },
+      { name = "GUM_RECOVERY_ADDRESS", value = var.recovery_address }
     ], local.payer_environment, local.payer_email_environment, local.identity_environment),
     # The API verifies the deployed contract generation on every chain at
     # startup, so it reads each chain through the same RPC secrets as the indexer.
@@ -783,6 +781,16 @@ resource "aws_ecs_task_definition" "api" {
     ], local.rpc_url_secrets, local.payer_secrets, local.payer_email_secrets, local.identity_secrets, local.privy_secrets, local.relay_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
+
+  # The recovery address is the custody term committed into every payment
+  # contract at deployment; a wrong or zero address would misroute every
+  # recovery, so the definition refuses to apply without one.
+  lifecycle {
+    precondition {
+      condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.recovery_address)) && lower(var.recovery_address) != "0x0000000000000000000000000000000000000000"
+      error_message = "recovery_address must be a nonzero 20-byte EVM address, derived from the recovery KMS key's public key (see infra/README.md)."
+    }
+  }
 }
 
 resource "aws_ecs_task_definition" "indexer" {

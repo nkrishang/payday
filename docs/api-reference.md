@@ -23,7 +23,8 @@ cannot mint or revoke a key. A credential grants full read/write access to its
 account; keys are not currently scoped.
 
 A **deposit request** is the document — issuer, payer, one directly specified
-amount, optional notes, heading, reference, and metadata, a payer policy, and
+amount, optional notes, heading, reference, and metadata, optional
+verification add-ons, and
 at most one PDF attachment. A **deposit** is its on-chain fulfilment: the funds that
 answer the request. The API resource is the deposit request, and the state of its deposit is
 read from it. There are no line items,
@@ -106,7 +107,7 @@ Requires `Idempotency-Key` containing 1–255 bytes.
   "heading": "March retainer",
   "reference": "INV-1042",
   "notes": "Net 30. Thank you.",
-  "payer_policy": {"mode": "verified_email", "expected_email": "alice@customer.example"},
+  "verification": {"email": {"expected_email": "alice@customer.example"}},
   "attachment_id": "att_0198f80c-8d2f-7dc1-a369-90556a64f700",
   "customer_id": "cus_0198f80c-1111-7dc1-a369-90556a64f700",
   "expires_in": 3600,
@@ -118,10 +119,10 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 |---|---|
 | `amount` | Required positive decimal in the request's currency; at most six fractional digits. Used directly; nothing is summed or reconciled |
 | `currency` | Optional; `USDC` (default) or `USDT`. USDC bridges 1:1, so a USDC request may be paid on any network and withdrawn to any; USDT has no such path, so a USDT request must pin `chain_id` to a network serving USDT (`400 invalid_request` naming `chain_id` when missing). `422 unsupported_currency` when no network serves it |
-| `chain_id` | Optional decimal chain id (`"143"`) pinning the network the payer must pay on; `networks` then holds that one entry and `chain` and `token` name it from issuance. Left out, the payer chooses among every network serving the currency when they sign. `422 unsupported_chain` when the chain does not serve the currency |
+| `chain_id` | Optional decimal chain id (`"143"`) pinning the network the payer must pay on; `networks` then holds that one entry and `chain`, `token`, and `address` name it from issuance. Left out, the payer picks a network on the hosted checkout's network-selection step. `422 unsupported_chain` when the chain does not serve the currency |
 | `payout_address` | Required nonzero EVM address; receives exactly `amount` |
-| `issuer`, `payer` | The parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim. `issuer` is required and snapshotted onto the deposit request. `payer` is optional when `customer_id` is given: the saved record's name, email, and details are snapshotted in its place, and an inline party always wins. A `payer.email` is also where Gum emails the issued request, except under `merchant_session` (see [Deposit requests](deposit-requests-api.md)) |
-| `payer_policy` | Required; one of the three modes below |
+| `issuer`, `payer` | The parties: `name` 1–255 bytes, optional `email` 3–254 bytes, optional `details` up to 4,000 bytes of free text rendered verbatim. `issuer` is required and snapshotted onto the deposit request. `payer` is optional when `customer_id` is given: the saved record's name, email, and details are snapshotted in its place, and an inline party always wins. A `payer.email` is also where Gum emails the issued request, except on a request with the merchant-auth add-on (see [Deposit requests](deposit-requests-api.md)) |
+| `verification` | Optional object of up to three independent add-ons, described below; omitted or `{}` means none of them — fully permissionless. `payer_policy` is rejected as an unknown field |
 | `customer_id` | Optional `cus_` id of a customer the account owns; the deposit request still stores its own `payer` snapshot |
 | `issuer_id` | Optional opaque issuer identifier of your own, 1–255 bytes, stored verbatim beside the issued document and returned on reads. Not an internal id: nothing is looked up, and the list route filters on it by exact string equality. Every byte but NUL (`U+0000`) passes through |
 | `notes` | Optional, up to 4,000 bytes |
@@ -132,23 +133,25 @@ Requires `Idempotency-Key` containing 1–255 bytes.
 | `expires_at` | Optional RFC 3339 deadline; mutually exclusive with `expires_in` |
 | `metadata` | JSON object, at most 16 keys and 512 encoded bytes per value; merchant-only |
 
-Payer policy shapes:
+Verification add-on shapes, combinable in any way:
 
 ```json
-{"mode": "permissionless"}
-{"mode": "verified_email", "expected_email": "alice@example.com"}
-{"mode": "merchant_session", "payer_reference": "user_123"}
+{"email": {"expected_email": "alice@example.com"}}
+{"merchant_auth": {"payer_reference": "user_123"}}
+{"wallet_attestation": true}
+{"email": {"expected_email": "alice@example.com"}, "wallet_attestation": true}
 ```
 
-`expected_email` is required for `verified_email` and is trimmed and
-lowercased; `payer_reference` is required for `merchant_session` and is
+`expected_email` is required for the email add-on and is trimmed and
+lowercased; `payer_reference` is required for merchant auth and is
 trimmed, case preserved: 1–128 bytes of printable text with no whitespace,
-your own identifier for the user your application has signed in. Each
-assertion is forbidden on the other modes. Assertions are merchant-supplied
+your own identifier for the user your application has signed in. Assertions
+are merchant-supplied
 and cannot be edited by the payer; the payer route shows only a masked email
-hint, and never the payer reference.
+hint, and never the payer reference. Wallet attestation takes no assertion:
+the payer signs, and the signature is the fact.
 
-For `merchant_session` the `201` response additionally carries
+For merchant auth the `201` response additionally carries
 `client_secret` and `client_secret_expires_at`: a single-use secret, valid
 for fifteen minutes, that opens the hosted checkout for that payer. It is
 returned exactly once — never on an idempotent replay or a later `GET`; the
@@ -165,16 +168,20 @@ never leaves a half-issued deposit request or a retagged attachment behind.
 The smallest valid request names the parties and nothing else:
 
 ```json
-{"amount": "10.50", "payout_address": "0x1111111111111111111111111111111111111111", "issuer": {"name": "Acme LLC"}, "payer": {"name": "Globex Inc"}, "payer_policy": {"mode": "permissionless"}}
+{"amount": "10.50", "payout_address": "0x1111111111111111111111111111111111111111", "issuer": {"name": "Acme LLC"}, "payer": {"name": "Globex Inc"}}
 ```
 
-Unknown fields are rejected; `memo` and `refund_address` are not fields.
-Recovery is not a request field: it is the payer's attested wallet, bound
-after issuance. Expiry defaults to 24 hours and must be 10 minutes to 366 days
+Unknown fields are rejected; `memo`, `refund_address`, and `payer_policy` are
+not fields.
+Recovery is not a request field: every deposit address's recovery term is
+Gum's own dedicated KMS recovery wallet (`recovery_address`), where
+overpayment remainders, expired balances, and late transfers land on-chain
+before Gum returns them to the payer manually, after review. Expiry
+defaults to 24 hours and must be 10 minutes to 366 days
 ahead. A first request returns `201`; an identical retry returns the original
 deposit with `200` and `Idempotency-Replayed: true`. Reuse with any changed
 immutable field — parties, amount, currency, notes, heading, reference, metadata,
-customer, policy mode or assertions, expiry intent, the networks offered
+customer, verification add-ons, expiry intent, the networks offered
 (each chain with its token and factory), or the attachment's ID, length, or
 SHA-256 — returns
 `409 idempotency_conflict`; the original must then be fetched with `GET`.
@@ -183,15 +190,24 @@ also requires the account to have a verified support email from a recent login.
 
 At issuance Gum canonicalizes the deposit request (RFC 8785 JCS) and hashes it; the
 response's `attribution {version, hash}` (version 2) reports the commitment.
-The deposit address does not exist yet: `address`, `payer_wallet`,
-`recovery_address`, `wallet_bound_at`, and `self_settlement` are `null` until
-the payer, on the hosted page and once the policy is satisfied, signs the
-request's EIP-712 attestation from the wallet they will pay from. The salt is
-then derived from the attribution hash and that signature's digest, the wallet
-becomes the address's recovery term, and the address follows. A
-`deposit_request.ready` webhook reports the binding; integrations that quote an
-address wait for it (or poll until `address` is set). Only transfers from the
-attested wallet are the payer's, and excess or late funds return to it.
+The deposit address exists as soon as the network is fixed. With `chain_id`
+pinned — or where the deployment offers a single network — the create
+response already carries `address`, `chain`, `token`, and `recovery_address`,
+and no payer signature is involved at all. Without a pin, the payer fixes the
+network on the hosted checkout (`POST
+/v1/payer/deposit-requests/{id}/network`) and those fields follow. With the
+`wallet_attestation` add-on, the payer instead signs the request's EIP-712
+attestation from the wallet they will pay from, on the network the challenge
+names: `address` and `payer_wallet` are `null` until that attestation is
+accepted (`wallet_bound_at` set). In every case the salt is derived from the
+attribution hash, a server-generated issuance nonce, and — when wallet
+attestation is attached — that signature's digest. A
+`deposit_request.ready` webhook reports the moment the address exists;
+integrations that quote an address wait for it (or poll until `address` is
+set). On a wallet-attested request, only transfers from the attested wallet
+are the payer's, and funds from any other wallet flag the request
+`likely_unsolicited_at`; without the add-on, transfers from any wallet are
+good and nothing is ever flagged.
 
 ### `GET /v1/deposit-requests`
 
@@ -209,7 +225,8 @@ Lists newest first. Query parameters:
 
 Returns `{ "deposit_requests": [DepositRequestSummary], "next_cursor": null | "dr_…" }`.
 Summaries contain `id`, `deposit_url`, `heading`, `payer_name`, `reference`,
-`metadata`, `payer_policy_mode`, `customer_id`, `issuer_id`,
+`metadata`, `verification` (the add-ons the request was issued with,
+including the assertions the merchant themselves named), `customer_id`, `issuer_id`,
 `has_attachment`, `verification_completed_at`, `likely_unsolicited_at`,
 `created_at`, `updated_at`, `expires_at`, `status`, `amount`, `received`,
 `currency`, and `cancellation_requested_at`: what a list needs to render and link each row
@@ -263,46 +280,58 @@ the same deposit request always produces byte-identical output.
 
 ### `GET /v1/deposit-requests/{reference}/verification`
 
-The merchant's verification view of one deposit request: `payer_policy_mode`,
+The merchant's verification view of one deposit request: `verification` (the
+add-ons the request was issued with, without the expected email),
 `verification_completed_at`, `likely_unsolicited_at`, `facts` (`email` and
-`merchant_session`, each `not_required`, `pending`, or `approved`; `wallet`
-as `pending` or `approved`, never `not_required`; plus `complete`, the
-identity policy alone), and every `attempts[]` entry (`kind` `email`,
-`wallet`, or `merchant_session`, `status` pending, approved, or abandoned,
-`verified_at`, `created_at`). A `merchant_session` attempt is the exchange of
+`merchant_auth`, each `not_required`, `pending`, or `approved`; `wallet` as
+`not_required`, `pending`, or `approved`; plus `complete`, the identity
+add-ons alone), and every `attempts[]` entry (`kind` `email`,
+`wallet`, or `merchant_auth`, `status` pending, approved, or abandoned,
+`verified_at`, `created_at`). A merchant-auth attempt is the exchange of
 a client secret, recorded approved; a `wallet` attempt is the accepted
-attestation. The payer's session, the client secret, and the code they typed
+attestation, and exists only on a wallet-attested request. The payer's
+session, the client secret, and the code they typed
 are never in this response.
 
 ### `POST /v1/deposit-requests/{reference}/client-secret`
 
-Mints a fresh single-use client secret for a `merchant_session` deposit:
+Mints a fresh single-use client secret for a request with the merchant-auth
+add-on:
 `201 {client_secret, expires_at}`, `no-store`. Use it when the payer your
 application signed in comes back after the first secret was spent or
 expired; earlier unspent secrets stay valid until they expire, so retrying a
-redirect never breaks a link already sent. Permissionless deposit requests answer
-`409 verification_not_required`, `verified_email` deposits
-`409 verification_method_not_applicable`, and a deposit that closed without
-completing verification `410 deposit_request_not_payable`. A settled deposit that did
+redirect never breaks a link already sent. Requests without the merchant-auth
+add-on answer
+`409 verification_not_required`, and a deposit that closed without
+completing its identity checks `410 deposit_request_not_payable`. A settled deposit that did
 verify still mints, so the app can reopen the receipt for its user.
 
 ### `GET /v1/deposit-requests/{reference}/proof`
 
-Returns the Proof of Payment JSON (`gum.proof.v4`) for a settled deposit request
+Returns the Proof of Payment JSON (`gum.proof.v5`) for a settled deposit request
 (`payment_id` is the `dr_` id; inside `canonical_issuance_snapshot`, `attachment.id`
 is the raw UUID behind the API's `att_` id, since that document is the hashed
 commitment and its schema is frozen);
-`409 deposit_request_not_settled` before then, and `409 deposit_sender_mismatch` when
+`409 deposit_request_not_settled` before then. On a wallet-attested request it
+is also `409 deposit_sender_mismatch` when
 any credited transfer came from a wallet other than the attested one and is
-not a Relay delivery attributed to it (`transfers[].relay`, vouched for in
-`verification.payload.relay_fills`), since no proof can then claim the
-attested wallet paid. The proof carries the
-canonical issuance snapshot, canonicalization version, attribution hash,
-`payer_wallet {address, typed_data, digest, signature, method}` (the exact
+not a Relay delivery attributed to it — which cannot arise, since Relay is
+unavailable for wallet-attested requests — since no proof can then claim the
+attested wallet paid. The proof carries a `scope`:
+`wallet_attributed` when the request carried the wallet-attestation add-on,
+`settlement` when it did not.
+It carries the
+canonical issuance snapshot (`gum.invoice.v5`, which includes the recovery
+address and the verification add-ons in place of the old `payer_policy`),
+canonicalization version, attribution hash,
+`issuance_nonce` (the server-generated nonce the salt commits to),
+`payer_wallet {address, typed_data, digest, signature, method}` on a
+wallet-attested request (the exact
 EIP-712 document the payer's wallet signed, its signing digest, and the
 signature), salt, the chosen chain with its factory and token (one of the
 `networks` the snapshot offered, whose entry must match), deposit and
-recovery addresses (the recovery address is the attested wallet), every
+recovery addresses (the recovery address is always Gum's KMS recovery
+wallet), every
 credited transfer of the request's token
 into the deposit address, and `settlement_transaction_hash`: the fulfilment
 transaction that executed the `Payment` contract — the same hash the
@@ -310,16 +339,18 @@ transaction that executed the `Payment` contract — the same hash the
 third party submitted it — which is distinct from the transfers that funded
 the address. It ends with a Gum-signed verification attestation
 (`{payload: {version, payment_id, attribution_hash, chain_id,
-payment_address, payer_wallet, wallet_nonce, payer_policy_mode, result,
+payment_address, payer_wallet, wallet_nonce, verification, result,
 verified_at, wallet_bound_at, facts[{kind, provider, at}]}, signer,
 signature}`). The payload names the deposit request's attribution hash, chain,
-deposit address, payer wallet, and the nonce inside the wallet's attestation,
+deposit address, payer wallet where attested, and the nonce inside the wallet's
+attestation,
 so an attestation is bound to the document and the payer it was issued for
 and cannot be transplanted onto a proof for another deposit request or another
 wallet. Anyone holding the proof (and, if attached, the PDF) can recompute
 hash → attestation → salt → CREATE3 address offline — `gum_core::verify_proof`
-is the reference — which also requires every listed transfer to come from the
-attested wallet and the transfers to sum to at least the requested amount;
+is the reference — which also requires every listed transfer of a
+`wallet_attributed` proof to come from the attested wallet and the transfers
+to sum to at least the requested amount;
 whether the transfers and the settlement transaction really executed is
 provable only against the chain (`--rpc-url`). It is merchant-accessible and
 shared at the merchant's discretion; it is not a public link.
@@ -337,25 +368,29 @@ The full deposit request response contains:
   checkout offers them; each `token` is the currency's contract on that
   chain and `token.symbol` is what a wallet shows there (`USDT0` for USDT on
   Monad and Arbitrum). The merchant chooses only by pinning `chain_id`, which
-  USDT requires. `chain`, `token`,
-  `address`, `payer_wallet`, `recovery_address`, and `wallet_bound_at` are
-  `null` until the payer's wallet is bound, which also fixes the network:
-  `chain` and `token` then name the payer's choice, and `recovery_address`
-  always equals `payer_wallet`, the wallet overpayment remainders, expired
-  balances, and late transfers return to;
+  USDT requires. When the network is not pinned, `chain`, `token`,
+  `address`, and `recovery_address` are `null` until the payer picks a network
+  on the checkout (`chain` and `token` then name the payer's choice); with the
+  `wallet_attestation` add-on they are `null` until that attestation is
+  accepted, which also sets `payer_wallet` and `wallet_bound_at`.
+  `recovery_address` is always Gum's dedicated KMS recovery wallet, the
+  custody address overpayment remainders, expired balances, and late
+  transfers land in before Gum returns them to the payer manually;
 - accounting: `amount`, `received`, `remaining`, `fee_amount`, and `net_amount`,
   each with a corresponding `_base_units` field; current fees are zero;
 - state: `status`, `deposited_at`, `deposited_at_block`, `settled_at`, `settled_block`,
   `expired_at`, `cancellation_requested_at`, `settlement_tx_hash`, optional
   explorer URL, and optional `attention {code,message,action}`;
 - deposit request document: `issuer`, `payer`, `notes`, `heading`, `reference`,
-  `customer_id`, `metadata`, the full `payer_policy` including assertions
-  (merchant-only), optional `attachment` descriptor, `created_at`,
-  `updated_at`;
+  `customer_id`, `metadata`, the full `verification` including assertions
+  (merchant-only; the expected email is withheld from payer views), optional
+  `attachment` descriptor, `created_at`, `updated_at`;
 - verification: `verification_completed_at`, and `likely_unsolicited_at` when
-  finalized funds first arrived from a wallet other than the attested one;
+  the request carries the wallet-attestation add-on and finalized funds first
+  arrived from a wallet other than the attested one;
 - audit/freshness: `transfers`, optional `as_of {block,at}`,
-  `indexer_freshness`, `self_settlement {factory,salt}` (null until bound),
+  `indexer_freshness`, `self_settlement {factory,salt}` (null until the
+  address exists),
   and `attribution {version,hash}`.
 
 Public status values are `awaiting_deposit`, `partially_deposited`, `deposited`,
@@ -576,7 +611,7 @@ The checkout reads deposit data from `GET /v1/payer/deposit-requests/{id}`, QR S
 from `GET /v1/payer/deposit-requests/{id}/qr`, and the PDF descriptor from
 `GET /v1/payer/deposit-requests/{id}/attachment`. These routes are unauthenticated,
 accept no account API key, and expose no merchant data: no payout or recovery
-address, metadata, customer, or policy assertions. JSON responses use
+address, metadata, customer, or verification assertions. JSON responses use
 `Cache-Control: no-store`, and QR requests return `410 deposit_request_not_payable` once
 the address should no longer be presented. They send
 `Access-Control-Allow-Origin: *` for `GET`, so a browser on any origin can build
@@ -589,26 +624,32 @@ dashboard lives, for `GET`, `POST`, `PATCH`, `PUT`, and `DELETE` with the
 integrations are unaffected, and no other route allows cross-origin reads.
 
 The payer response discloses progressively. It always carries `id`,
-`issuer_name`, `heading`, `payer_policy {mode, expected_email_hint}`,
-`requirements {email, wallet, merchant_session, complete}` (`email` and
-`merchant_session` are each `not_required`, `pending`, or `approved`;
-`wallet` is `pending` or `approved`; `complete` is the identity policy
-alone), `status`, `payable`, `expires_at`, `server_timestamp`,
-`settlement_tx_hash`, `settlement_explorer_url`, `payer_message`, and
-`content_unlocked`. For a `permissionless` deposit request `content_unlocked` is true
+`issuer_name`, `heading`, `verification {expected_email_hint}` (a masked hint
+of the expected mailbox, `a****@e***.com`, when the email add-on is attached;
+`null` otherwise — the payer reference is never shown to the payer),
+`requirements {email, wallet, merchant_auth, complete}` (`email` and
+`merchant_auth` are each `not_required`, `pending`, or `approved`;
+`wallet` is `not_required` unless the wallet-attestation add-on is attached;
+`complete` is the identity add-ons alone), `status`, `payable`, `expires_at`,
+`server_timestamp`, `settlement_tx_hash`, `settlement_explorer_url`,
+`payer_message`, and `content_unlocked`, which is driven by the identity
+add-ons only. For a request with no email or merchant-auth add-on
+`content_unlocked` is true
 and the response includes `currency`, `networks`, `amount`, `received`,
 `remaining` (each with base units), and
 `details {amount, amount_base_units, payer, notes, reference, attachment}`.
-`chain`, `token`, `payer_wallet`, `address`, `address_explorer_url`, and
-`deposit_uri` are present only once the payer's wallet is bound on a chosen
-network: until then the request has no chain and no address to show. For the gated modes every one of those fields — and
+`chain`, `token`, `address`, `address_explorer_url`, and
+`deposit_uri` are present only once the network is fixed — immediately, when
+`chain_id` is pinned or the deployment offers one network; after the payer's
+network selection otherwise — and `payer_wallet` is present only on a
+wallet-attested request, once the attestation is accepted. Until then the
+request has no chain and no address to show. For a gated request every one of those fields — and
 `settlement_tx_hash` and `settlement_explorer_url`, since a settlement
 transaction would reveal the amount and payout address the gate withholds —
-is `null` until the payer's session satisfies the policy; the hint masks the
-expected mailbox as `a****@e***.com`, and is `null` for `merchant_session`,
-whose payer reference is never shown to the payer.
+is `null` until the payer's session satisfies the identity add-ons.
 The attachment and QR routes answer `401 verification_required` while content
-is locked, and the QR route `409 wallet_required` while no wallet is bound. A payer session token, obtained by completing verification on the
+is locked, and the QR route `409 deposit_request_not_ready` before the
+deposit address exists. A payer session token, obtained by completing verification on the
 hosted checkout, travels in the `Gum-Payer-Session` header on every payer
 read; the reads' `Access-Control-Allow-Headers` admits it. A session unlocks
 exactly the deposit request it was created for. When a session is presented,
@@ -638,13 +679,32 @@ the same payer session; this proof is audience-, deposit request-, and session-b
 contains no Auth0 bearer token, and responses are `no-store`. The deposit request's
 verification completes and the session unlocks the content.
 `GET …/verify` reports the same shape for a session, or for the deposit request as a
-whole without one. Permissionless deposit requests answer
+whole without one. Requests without the email add-on answer
 `409 verification_not_required`; deposit requests past their deadline or already
 settled answer `410 deposit_request_not_payable`, because verification after expiry
 cannot revive settlement. The exception is a terminal deposit request that previously
 completed verification: `start` and `confirm` explicitly re-prove its expected
 mailbox and mint a new 24-hour receipt session. Expired sessions never unlock
 terminal content, and receipt re-authentication never makes the deposit request payable.
+
+### Network selection
+
+```text
+POST /v1/payer/deposit-requests/{id}/network   {"chain_id": "143"}
+```
+
+For a request whose `chain_id` the merchant did not pin and which carries no
+wallet-attestation add-on: this is the checkout's network-selection step, and
+no wallet signature is involved. `chain_id` must be one of the request's
+`networks` (else `422 unsupported_chain`). The route writes the chain, its
+token and factory, the salt, and the deposit address together, once, and
+returns the payer deposit with `chain`, `token`, `address`, and
+`address_explorer_url` set; the create response and every earlier read
+carried them as `null`. A gated request needs the session that satisfied its
+identity add-ons (`401 payer_session_invalid` or `401 verification_required`
+otherwise). The choice is final: the address commits to the chain. On a
+wallet-attested request the network is chosen in the wallet challenge
+instead, and this route answers `409 wallet_challenge_required`.
 
 ### Wallet attestation
 
@@ -653,37 +713,40 @@ POST /v1/payer/deposit-requests/{id}/wallet/challenge   {"wallet": "0x…", "cha
 POST /v1/payer/deposit-requests/{id}/wallet/attest      {"wallet": "0x…", "signature": "0x…"}
 ```
 
-Every request, gated or not, takes this step before it has an address, and
-it is where the payer chooses the network: `chain_id` must be one of the
+Only a request with the `wallet_attestation` add-on takes this step, and it
+is where that payer chooses the network: `chain_id` must be one of the
 request's `networks` (else `422 unsupported_chain`). `challenge` mints a
-one-time nonce on the payer's session (a permissionless request without a
-session gets one here, returned as `payer_session`; a gated request needs
-the session that satisfied its policy, else `401 payer_session_invalid` or
+one-time nonce on the payer's session (a request without identity add-ons
+gets one without a session, returned as `payer_session`; a gated request needs
+the session that satisfied its identity add-ons, else `401 payer_session_invalid` or
 `401 verification_required`) and answers `{payer_session, expires_at, chain,
 typed_data}`, where `typed_data` is the EIP-712 document to hand to
 `eth_signTypedData_v4` verbatim: domain `{name: "Gum", version: "1",
 chainId, verifyingContract: factory}` for the chosen chain and its factory,
 so a wallet on another network refuses to sign it; primary type
 `PayerAttestation`, message `{statement, attributionHash, wallet, nonce,
-expiresAt}`. The challenge is void after ten minutes. `attest` takes the
+expiresAt}`. The statement says that the signer controls the wallet and
+intends it to pay this deposit request; it says nothing about where funds
+return. The challenge is void after ten minutes. `attest` takes the
 wallet and its 65-byte signature; the API rebuilds the document from its own
 record, under the chain the challenge was minted for (the client cannot swap
 chains between the two calls), requires the signature to recover to `wallet`
 (externally owned accounts only for now; `401 wallet_signature_invalid`
-otherwise), and binds: the chain, its token and factory, the salt, the
-recovery term (the wallet), and the deposit address are written together,
+otherwise), and binds: the chain, its token and factory, the salt, and the
+deposit address are written together,
 once, and the unlocked payer deposit is returned with `chain`, `token`,
 `address`, and `payer_wallet` set. The address commits to the chain: the
 `Payment` contract refuses to settle on any other network, so the token sent
-to it elsewhere is refused rather than lost and is returned by hand
+to it elsewhere is refused rather than lost and is recovered into Gum's
+custody and returned to the payer after review
 (`docs/runbooks/wrong-network-deposit.md`). A request already bound
 to another wallet answers `409 wallet_already_bound` naming it; attesting
 without an outstanding challenge answers `409 wallet_challenge_required`;
 a request past `created` or past its deadline answers
 `410 deposit_request_not_payable`.
 
-Email routes on a `merchant_session` deposit answer
-`409 verification_method_not_applicable`: that mode sends no codes.
+Email routes on a merchant-auth deposit answer
+`409 verification_method_not_applicable`: that add-on sends no codes.
 
 ### Paying from another network
 
@@ -694,15 +757,18 @@ POST /v1/payer/deposit-requests/{id}/relay/quotes/{quote_id}/sent  {"transaction
 ```
 
 Once the address exists and while the request is payable
-(`relay_available` on the payer view), the attested wallet may pay from
-another network through Relay. `chains` lists every origin network, each
+(`relay_available` on the payer view), the payer may pay from
+another network through Relay. Relay is **unavailable for wallet-attested
+requests**: a relay solver pays from a different wallet, which contradicts
+sender attestation, so the routes answer `409 relay_not_available` there and
+the checkout does not offer the option. `chains` lists every origin network, each
 with `tokens: [{currency, symbol, address, decimals}]`, the stablecoins the
 payer may send there (USDC, and USDT where served). `quotes` takes the
 origin chain and optionally one of those addresses as `origin_token` (the
 network's USDC by default) and answers a `RelayQuote` carrying `origin`,
 `origin_token`, `amount_in` in that token, `amount_out` in the request's
 currency (exactly the amount still due), and the transactions to send from
-the wallet; Relay swaps between currencies and the payer carries the
+the payer's wallet; Relay swaps between currencies and the payer carries the
 spread. `sent` reports the origin transaction. `404 relay_unavailable` on a
 deployment without Relay, `422 relay_unsupported_origin` for a network or
 token not offered, `502 relay_quote_failed` when Relay has no route,
@@ -714,11 +780,12 @@ token not offered, `502 relay_quote_failed` when Relay has no route,
 POST /v1/payer/deposit-requests/{id}/session   {"client_secret": "cs_…"}
 ```
 
-The `merchant_session` mode is for applications that have already signed
+The merchant-auth add-on is for applications that have already signed
 their user in. The flow, end to end:
 
 1. Your server creates the deposit request with
-   `{"mode": "merchant_session", "payer_reference": "<your user id>"}` and
+   `{"merchant_auth": {"payer_reference": "<your user id>"}}` in
+   `verification` and
    receives `client_secret` in the `201`.
 2. Your server sends the signed-in user to
    `deposit_url + "#cs=" + client_secret`. The secret rides in the URL
@@ -728,8 +795,8 @@ their user in. The flow, end to end:
 3. The hosted checkout reads the fragment, removes it from the address bar,
    and exchanges it here: `200 {payer_session, expires_at, requirements}`,
    `no-store`. The exchange is the verification. It mints a 24-hour payer
-   session that already satisfies the policy, records an approved
-   `merchant_session` attempt, and, while the deposit request is live, sets
+   session that already satisfies the identity add-ons, records an approved
+   `merchant_auth` attempt, and, while the deposit request is live, sets
    `verification_completed_at`, which raises `verification.approved`. The
    page renders unlocked; the payer types nothing.
 4. The payer pays. `deposit_request.deposited` and `deposit_request.settled` follow as usual,
@@ -749,7 +816,7 @@ provider.
 What Gum attests here is narrow and stated plainly: your server released
 this secret, and it was exchanged before this session saw the deposit request. Who
 the payer is remains your assertion — `payer_reference` — carried in the
-policy, the issuance snapshot the address commits to, and every webhook.
+verification add-ons, the issuance snapshot the address commits to, and every webhook.
 
 The write routes answer cross-origin requests only from the hosted
 checkout origin (`GUM_HOSTED_CHECKOUT_ORIGIN`) for `POST` with
@@ -764,8 +831,8 @@ limited to 8 KiB.
 | `payer_session_invalid` | 401 | `Gum-Payer-Session` missing, unknown, expired, or for another deposit request |
 | `otp_invalid` | 401 | The verification code was not accepted |
 | `verification_required` | 401 | Content or QR requested for a gated deposit request without an unlocked session |
-| `verification_not_required` | 409 | Verification started, or a client secret requested, on a permissionless deposit request |
-| `verification_method_not_applicable` | 409 | Email codes on a `merchant_session` deposit request, or a client secret on a `verified_email` one |
+| `verification_not_required` | 409 | Verification started, or a client secret requested, on a request without that add-on |
+| `verification_method_not_applicable` | 409 | Email codes on a merchant-auth deposit request, or a client secret on an email-verified one |
 | `client_secret_invalid` | 401 | The client secret is unknown, malformed, expired, or for another deposit request |
 | `client_secret_used` | 409 | The client secret was already exchanged; the link was opened once |
 | `verification_not_started` | 409 | Confirm called before a code was sent, or after it was spent |
@@ -795,7 +862,7 @@ limited to 8 KiB.
 | `withdrawal_finished` | 409 | The withdrawal already completed, failed, or was cancelled |
 | `withdrawals_unavailable` | 503 | A balance could not be read, or a chain holding funds cannot bridge on this deployment |
 | `invalid_amount` | 400 | Invalid amount syntax, precision, or positivity |
-| `unsupported_chain` | 422 | Wallet challenge named a chain the request does not offer, or a `chain_id` pin named a chain that does not serve the request's currency |
+| `unsupported_chain` | 422 | Wallet challenge or network selection named a chain the request does not offer, or a `chain_id` pin named a chain that does not serve the request's currency |
 | `unsupported_currency` | 422 | No network on this deployment serves the requested `currency`, on a deposit request or a withdrawal |
 | `relay_unavailable` | 404 | The deployment has no Relay integration |
 | `relay_unsupported_origin` | 422 | A relay quote named a network or token `relay/chains` does not offer |
@@ -813,8 +880,9 @@ limited to 8 KiB.
 | `attachment_not_ready` | 409 | `attachment_id` refers to an upload that is not finalized, was rejected, or expired unused before issuance (upload the PDF again); also returned by finalize before anything reached `upload_url` |
 | `attachment_already_attached` | 409 | `attachment_id` already belongs to an issued deposit request; one PDF per deposit request |
 | `deposit_request_not_settled` | 409 | Proof requested before settlement |
-| `deposit_sender_mismatch` | 409 | Proof requested for a deposit request credited from a wallet other than the attested one |
-| `wallet_required` | 409 | QR requested before the payer bound a wallet; the address does not exist yet |
+| `deposit_sender_mismatch` | 409 | Proof requested for a wallet-attested deposit request credited from a wallet other than the attested one |
+| `relay_not_available` | 409 | A relay route was called for a wallet-attested request; sender attestation excludes relayed payments |
+| `deposit_request_not_ready` | 409 | QR requested before the deposit address exists; the network is not fixed yet |
 | `wallet_already_bound` | 409 | A wallet challenge or attestation for a request already bound to another wallet; the message names it |
 | `wallet_challenge_required` | 409 | Attest called without an outstanding, unexpired challenge on the session |
 | `wallet_signature_invalid` | 401 | The signature does not recover to the stated wallet (smart-contract wallets are not supported yet) |

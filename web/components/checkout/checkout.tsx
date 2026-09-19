@@ -13,6 +13,7 @@ import { CheckoutFrame } from "./frame";
 import { RequestDetails } from "./request-details";
 import { ClientSecretExchange, type ClientSecretStatus } from "./merchant-session";
 import { NetworkSelect } from "./network-select";
+import { NetworkStep } from "./network-step";
 import { WalletProviders } from "./providers";
 import { QrPanel } from "./qr-panel";
 import { RelayPay } from "./relay-pay";
@@ -117,8 +118,9 @@ function CheckoutBody({
     [setPayerSession],
   );
   // The deposit request's own issuing merchant previews it exactly this way,
-  // regardless of payer policy: a session already minted server-side
-  // (`depositRequests.previewSession`), carried in the fragment precisely
+  // regardless of its verification add-ons: a session already minted
+  // server-side (`depositRequests.previewSession`), carried in the fragment
+  // precisely
   // like a merchant-session client secret, but adopted directly — there is
   // nothing to exchange, it is already a valid session.
   useEffect(() => {
@@ -130,12 +132,14 @@ function CheckoutBody({
     // Runs once, on mount, exactly like the client secret exchange below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  // A merchant-session deposit request arrives with its client secret in the URL
+  // A merchant-auth deposit request arrives with its client secret in the URL
   // fragment. The exchange below reads it once, on the client only, and the
-  // session it mints takes the same path the email flow's session does.
-  const merchantSession = payment.payer_policy.mode === "merchant_session";
+  // session it mints takes the same path the email flow's session does. The
+  // requirement stays "pending" until this tab's session satisfies it, so the
+  // exchange runs for every request that carries the add-on.
+  const merchantAuth = payment.requirements.merchant_session !== "not_required";
   const [clientSecretStatus, setClientSecretStatus] = useState<ClientSecretStatus>(() =>
-    merchantSession ? "exchanging" : "none",
+    merchantAuth ? "exchanging" : "none",
   );
   const secondsRemaining = useSecondsRemaining(payment, receivedAt);
   const view = checkoutView(payment, {
@@ -146,7 +150,8 @@ function CheckoutBody({
   });
   // Null exactly when the phase is one of the locked ones: the same narrowing
   // decides the phase and what may enter the tree. `ready` is null until the
-  // payer's wallet is bound and the address exists.
+  // address exists — a bound wallet with the attestation add-on, or a chosen
+  // network without it.
   const unlocked = unlockedDepositRequest(payment);
   const ready = unlocked === null ? null : readyDepositRequest(unlocked);
   // The chosen network, if it is one the request offers; a request offering
@@ -175,7 +180,7 @@ function CheckoutBody({
         {view.showInstructions ? <Countdown seconds={secondsRemaining} /> : null}
       </div>
 
-      {merchantSession ? (
+      {merchantAuth ? (
         <ClientSecretExchange
           paymentId={payment.id}
           payerSession={payerSession}
@@ -225,6 +230,8 @@ function CheckoutBody({
                 />
               </div>
             </section>
+          ) : view.phase === "network_required" ? (
+            <NetworkStep payment={unlocked} payerSession={payerSession} onRegistered={refresh} />
           ) : view.showInstructions && ready !== null ? (
             <section aria-label={view.title} className="px-5 py-6 sm:px-6">
               <AmountDue payment={ready} />

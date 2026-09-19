@@ -121,7 +121,7 @@ each is the API's own parameter, so a filter narrows the query rather than the
 page. A row carries the `issuer_id` the request was created with, the amount
 with the token's mark, and opens its detail when clicked. Every deposit shows
 its heading (or reference), the payer, the amount, the deposit request status,
-the payer-policy mode, the verification state, and a paperclip when a PDF is
+the verification add-ons, the verification state, and a paperclip when a PDF is
 attached. The status filter and the Previous/Next controls are the API's own
 `status` and `starting_after` parameters.
 
@@ -147,7 +147,7 @@ merchant came for:
 - *Document*: only what the row omits — the payer's address and details,
   the notes, a link to the saved customer, and the `issuer_id` the request
   carries;
-- *Verification* (gated requests only): the policy mode with the merchant's own
+- *Verification* (gated requests only): the add-ons with the merchant's own
   assertion (the expected email), and the verification verdict — separate from
   the deposit request status, because a gated request can be funded before its
   payer has verified. The activity behind it follows once there is any: every
@@ -175,7 +175,7 @@ merchant came for:
   which becomes available once the request settles and verifies offline
   (`gum_core::verify_proof`).
 
-Issued deposit requests are immutable; a different amount, party, policy, or
+Issued deposit requests are immutable; a different amount, party, verification, or
 attachment means a new deposit request.
 
 The dashboard wears the landing page's palette and type in both colour
@@ -191,23 +191,28 @@ size, the same Docs and Pricing links on the same 76px rule, plus Sign out
 
 Two indicators sit beside the deposit request status and mean different things.
 
-**Verification** — *Not required* for permissionless deposit requests; *Pending* until
-the gateway records that the expected payer completed the policy's checks;
+**Verification** — *Not required* for requests with no email or merchant-auth
+add-on; *Pending* until
+the gateway records that the expected payer completed the checks;
 *Verified*, with the completion time, afterwards.
 
-**Payer wallet** — the wallet the payer signed the request's attestation
+**Payer wallet** — on a wallet-attested request, the wallet the payer signed
+the attestation
 with, shown on the detail page with the address once it exists (the address
 is created from that signature; before it, the row says so). Only that
-wallet's transfers are the payer's.
+wallet's transfers are the payer's, and no wallet is shown on a request
+without the add-on, where the payer may pay from any.
 
 **Likely unsolicited** — shown, with the time, when finalized funds arrived
-from a wallet other than the attested one. The funds still count and settle;
+from a wallet other than the attested one; only a wallet-attested request can
+show it. The funds still count and settle;
 the flag says the attested wallet did not pay them, and no Proof of Payment
 will claim it did.
 
-**Returned to the payer** — a section on the detail page, present only when
-something went back to the payer's attested wallet rather than the payout
-address: the overpayment remainder on a settled deposit request, the full balance of
+**Recovered funds** — a section on the detail page, present only when
+something was recovered into Gum's recovery custody rather than paid out:
+the overpayment remainder on a settled deposit request, the full balance of
 a returned one, and every transfer the indexer classified as late, each with
-its transaction hash and whether it has been collected. Returns are on-chain
-and automatic.
+its transaction hash and whether it has been collected. Recovery is on-chain
+and automatic; the return to the payer is a manual review process and is not
+shown here.

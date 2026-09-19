@@ -350,6 +350,46 @@ impl ApiError {
         }
     }
 
+    /// The wallet-attestation route on a request that attached no such
+    /// add-on: its address exists without any attestation.
+    pub fn wallet_attestation_not_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_attestation_not_required",
+            message: "This deposit request did not attach the wallet-attestation add-on; pay from any wallet once its address exists".into(),
+        }
+    }
+
+    /// The network-selection route on a request that attached the
+    /// wallet-attestation add-on: the network follows the attestation, not
+    /// a plain choice.
+    pub fn wallet_attestation_required() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "wallet_attestation_required",
+            message: "This deposit request requires wallet attestation; attest a wallet instead of choosing a network".into(),
+        }
+    }
+
+    /// The payer already chose a network (or the merchant pinned one): the
+    /// request's address already exists on it.
+    pub fn network_already_chosen() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "network_already_chosen",
+            message: "The payment network is already set for this deposit request".into(),
+        }
+    }
+
+    /// The chosen network is not one the request was issued for.
+    pub fn network_conflict() -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "network_conflict",
+            message: "That network is not one this deposit request may be paid on".into(),
+        }
+    }
+
     /// Unknown, expired, or minted for another payment: one answer for all
     /// three, so a guess learns nothing about which.
     pub fn client_secret_invalid() -> Self {

@@ -254,7 +254,7 @@ CREATE TABLE invoices (
 
     -- The chain, factory, and token are binding-time facts: an unbound
     -- request commits to none of them (the payer chooses the network when
-    -- they attest a wallet), and once bound they are immutable.
+    -- they attest a wallet or select one), and once bound they are immutable.
     chain_id BIGINT,
     factory_address BYTEA,
     token_address BYTEA,
@@ -264,13 +264,17 @@ CREATE TABLE invoices (
     token_decimals SMALLINT NOT NULL,
     beneficiary_address BYTEA NOT NULL,
     expiration_timestamp BIGINT NOT NULL,
-    -- Set with the wallet binding: always equal to payer_wallet.
-    recovery_address BYTEA,
+    -- Always Gum's own recovery wallet (its KMS recovery key's address),
+    -- fixed at issuance and committed into the snapshot: never the payer's
+    -- wallet. Gum handles any recovery manually.
+    recovery_address BYTEA NOT NULL,
 
     amount TEXT NOT NULL,
-    -- Set with the wallet binding.
+    -- Set when the address is registered.
     salt BYTEA,
     payment_address BYTEA,
+    -- When the address was registered and deposits may arrive.
+    ready_at TIMESTAMPTZ,
     status TEXT NOT NULL,
 
     -- Funding and settlement, as observed on-chain.
@@ -322,28 +326,33 @@ CREATE TABLE invoices (
     notes TEXT,
     heading TEXT,
 
-    -- Payer policy: permissionless, verified_email (expected_email is the
-    -- asserted mailbox), or merchant_session (payer_reference is the
-    -- merchant's own opaque identifier for the authenticated payer).
-    payer_policy_mode TEXT NOT NULL DEFAULT 'permissionless',
+    -- The verification add-ons, independent of one another: email
+    -- verification (expected_email is the asserted mailbox), merchant auth
+    -- (payer_reference is the merchant's own opaque identifier for the
+    -- authenticated payer), and wallet attestation. None attached means the
+    -- request is permissionless: any incoming deposit counts.
     expected_email TEXT,
+    payer_reference TEXT,
+    wallet_attestation_required BOOLEAN NOT NULL DEFAULT false,
     verification_completed_at TIMESTAMPTZ,
 
     -- The canonical issuance snapshot and the attribution commitment over it.
     issuance_snapshot JSONB NOT NULL,
     attribution_version SMALLINT NOT NULL,
     attribution_hash BYTEA NOT NULL,
-    -- Set when funds arrive from a wallet other than the attested one.
+    -- The fresh secret drawn at issuance that the salt is derived from;
+    -- undisclosed until the payment address is registered.
+    issuance_nonce BYTEA NOT NULL,
+    -- Set when funds arrive from a wallet other than the attested one, and
+    -- only for a request that attached wallet attestation.
     likely_unsolicited_at TIMESTAMPTZ,
 
     -- Which issuer identity the request was issued under. The FK takes no
     -- delete action, so an identity that history refers to cannot vanish.
     issuer_id UUID,
-    payer_reference TEXT CHECK (
-        payer_reference IS NULL OR octet_length(payer_reference) BETWEEN 1 AND 128
-    ),
 
-    -- The payer wallet binding, written all at once.
+    -- The payer wallet binding, written all at once; present exactly when
+    -- wallet_attestation_required.
     payer_wallet BYTEA,
     payer_attestation JSONB,
     wallet_bound_at TIMESTAMPTZ,
@@ -420,18 +429,11 @@ CREATE TABLE invoices (
         FOREIGN KEY (account_id, customer_id) REFERENCES customers(account_id, id),
     CONSTRAINT invoices_issuer_fk
         FOREIGN KEY (account_id, issuer_id) REFERENCES issuers(account_id, id),
-    CONSTRAINT invoices_payer_policy_mode_valid CHECK (
-        payer_policy_mode IN ('permissionless', 'verified_email', 'merchant_session')
-    ),
-    CONSTRAINT invoices_payer_policy_shape CHECK (
-        (payer_policy_mode = 'permissionless'
-            AND expected_email IS NULL AND payer_reference IS NULL)
-        OR
-        (payer_policy_mode = 'verified_email'
-            AND expected_email IS NOT NULL AND payer_reference IS NULL)
-        OR
-        (payer_policy_mode = 'merchant_session'
-            AND expected_email IS NULL AND payer_reference IS NOT NULL)
+    CONSTRAINT invoices_issuance_nonce_length
+        CHECK (octet_length(issuance_nonce) = 32),
+    -- The add-ons are independent; each is present or absent on its own.
+    CONSTRAINT invoices_payer_reference_length CHECK (
+        payer_reference IS NULL OR octet_length(payer_reference) BETWEEN 1 AND 128
     ),
     CONSTRAINT invoices_expected_email_length CHECK (
         expected_email IS NULL OR octet_length(expected_email) BETWEEN 3 AND 254
@@ -448,19 +450,32 @@ CREATE TABLE invoices (
         CHECK (bill_to IS NULL OR invoice_party_valid(bill_to)),
     CONSTRAINT invoices_payer_wallet_length
         CHECK (payer_wallet IS NULL OR octet_length(payer_wallet) = 20),
-    -- All of the binding or none of it, and the recovery term is the wallet.
+    -- The addressing block all at once or not at all; the recovery term is
+    -- fixed at issuance and never the payer's wallet.
     CONSTRAINT invoices_binding_complete CHECK (
         (
-            payer_wallet IS NULL AND payer_attestation IS NULL AND wallet_bound_at IS NULL
-            AND recovery_address IS NULL AND salt IS NULL AND payment_address IS NULL
+            salt IS NULL AND payment_address IS NULL AND ready_at IS NULL
             AND chain_id IS NULL AND factory_address IS NULL AND token_address IS NULL
         )
         OR
         (
-            payer_wallet IS NOT NULL AND payer_attestation IS NOT NULL AND wallet_bound_at IS NOT NULL
-            AND recovery_address = payer_wallet AND salt IS NOT NULL AND payment_address IS NOT NULL
+            salt IS NOT NULL AND payment_address IS NOT NULL AND ready_at IS NOT NULL
             AND chain_id IS NOT NULL AND factory_address IS NOT NULL AND token_address IS NOT NULL
         )
+    ),
+    -- The wallet evidence all at once or not at all, and only for a request
+    -- that attached the wallet-attestation add-on.
+    CONSTRAINT invoices_wallet_evidence_complete CHECK (
+        (payer_wallet IS NULL AND payer_attestation IS NULL AND wallet_bound_at IS NULL)
+        OR
+        (payer_wallet IS NOT NULL AND payer_attestation IS NOT NULL AND wallet_bound_at IS NOT NULL
+            AND wallet_attestation_required)
+    ),
+    -- A request that attached wallet attestation cannot have an address
+    -- without a verified payer wallet behind it.
+    CONSTRAINT invoices_attestation_needs_wallet CHECK (
+        NOT wallet_attestation_required
+        OR payment_address IS NULL OR payer_wallet IS NOT NULL
     ),
     -- Nothing can arrive at an address that does not exist: an unbound
     -- request only ever waits or expires.
@@ -488,9 +503,9 @@ CREATE INDEX invoices_account_issuer_created
     ON invoices(account_id, issuer_id, created_at DESC)
     WHERE issuer_id IS NOT NULL;
 CREATE INDEX invoices_verification_pending
-    ON invoices(account_id, payer_policy_mode, expiration_timestamp)
+    ON invoices(account_id, expiration_timestamp)
     WHERE verification_completed_at IS NULL
-      AND payer_policy_mode <> 'permissionless';
+      AND (expected_email IS NOT NULL OR payer_reference IS NOT NULL);
 CREATE INDEX invoices_likely_unsolicited
     ON invoices(account_id, likely_unsolicited_at DESC)
     WHERE likely_unsolicited_at IS NOT NULL;
@@ -540,9 +555,10 @@ BEGIN
      OR NEW.heading IS DISTINCT FROM OLD.heading
      OR NEW.memo IS DISTINCT FROM OLD.memo
      OR NEW.reference IS DISTINCT FROM OLD.reference
-     OR NEW.payer_policy_mode IS DISTINCT FROM OLD.payer_policy_mode
-     OR NEW.expected_email IS DISTINCT FROM OLD.expected_email
      OR NEW.payer_reference IS DISTINCT FROM OLD.payer_reference
+     OR NEW.expected_email IS DISTINCT FROM OLD.expected_email
+     OR NEW.wallet_attestation_required IS DISTINCT FROM OLD.wallet_attestation_required
+     OR NEW.issuance_nonce IS DISTINCT FROM OLD.issuance_nonce
      OR NEW.issuance_snapshot IS DISTINCT FROM OLD.issuance_snapshot
      OR NEW.attribution_version IS DISTINCT FROM OLD.attribution_version
      OR NEW.attribution_hash IS DISTINCT FROM OLD.attribution_hash
@@ -557,6 +573,7 @@ BEGIN
      OR NEW.recovery_address IS DISTINCT FROM OLD.recovery_address
      OR NEW.salt IS DISTINCT FROM OLD.salt
      OR NEW.payment_address IS DISTINCT FROM OLD.payment_address
+     OR NEW.ready_at IS DISTINCT FROM OLD.ready_at
      OR NEW.chain_id IS DISTINCT FROM OLD.chain_id
      OR NEW.factory_address IS DISTINCT FROM OLD.factory_address
      OR NEW.token_address IS DISTINCT FROM OLD.token_address
@@ -572,9 +589,9 @@ BEFORE UPDATE OF
     account_id, idempotency_key, customer_id, issuer_id, chain_id, factory_address,
     token_address, currency, token_decimals, beneficiary_address, expiration_timestamp,
     expires_in_secs, expiration_intent, recovery_address, amount, net_amount,
-    salt, payment_address, issuer, bill_to, notes, heading, memo, reference,
-    payer_policy_mode, expected_email, payer_reference, issuance_snapshot,
-    attribution_version, attribution_hash,
+    salt, payment_address, ready_at, issuer, bill_to, notes, heading, memo, reference,
+    expected_email, payer_reference, wallet_attestation_required, issuance_nonce,
+    issuance_snapshot, attribution_version, attribution_hash,
     payer_wallet, payer_attestation, wallet_bound_at
 ON invoices
 FOR EACH ROW EXECUTE FUNCTION reject_invoice_issuance_mutation();
@@ -1058,6 +1075,12 @@ CREATE TABLE payer_sessions (
     id UUID PRIMARY KEY,
     token_hash BYTEA NOT NULL UNIQUE CHECK (octet_length(token_hash) = 32),
     invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+    -- Why the session exists: `payer` for the payer's own verification
+    -- session, `merchant_preview` for the issuing merchant's preview of the
+    -- payer view. A preview session carries every fact, but nothing it does
+    -- completes the invoice's real verification or binds a wallet.
+    purpose TEXT NOT NULL DEFAULT 'payer'
+        CHECK (purpose IN ('payer', 'merchant_preview')),
     payer_ref BYTEA CHECK (payer_ref IS NULL OR octet_length(payer_ref) = 32),
     email_verified_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1078,7 +1101,7 @@ CREATE TABLE payer_sessions (
 CREATE INDEX payer_sessions_invoice ON payer_sessions(invoice_id);
 CREATE INDEX payer_sessions_expiry ON payer_sessions(expires_at);
 
--- An email code (auth0), a wallet attestation (payday), or a merchant-session
+-- An email code (auth0), a wallet attestation (gum), or a merchant-session
 -- exchange (merchant), each recorded as an attempt of its own kind.
 CREATE TABLE payer_verifications (
     id UUID PRIMARY KEY,
@@ -1087,7 +1110,7 @@ CREATE TABLE payer_verifications (
     payer_session_id UUID NOT NULL REFERENCES payer_sessions(id) ON DELETE CASCADE,
     kind TEXT NOT NULL CHECK (kind IN ('email', 'wallet', 'merchant_session')),
     status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'abandoned')),
-    provider TEXT NOT NULL CHECK (provider IN ('auth0', 'payday', 'merchant')),
+    provider TEXT NOT NULL CHECK (provider IN ('auth0', 'gum', 'merchant')),
     provider_event_id TEXT,
     payer_ref BYTEA CHECK (payer_ref IS NULL OR octet_length(payer_ref) = 32),
     verified_at TIMESTAMPTZ,
@@ -1270,13 +1293,14 @@ $$;
 -- API's own object under the same names, units, and formats: the `dr_` id
 -- (and `cus_`/`iss_` for the records it names — every id the API emits is a
 -- UUID behind a resource prefix), decimal amounts beside their base units,
--- the policy mode, the merchant's
--- own payer reference, verification completion, the unsolicited-funding
+-- the verification add-ons, verification completion, the unsolicited-funding
 -- timestamp, the chain id the way the API names it (null until it is known:
 -- issuance for a pinned request, the wallet binding otherwise), and the
--- bound wallet and address; never the expected email or
--- any payer assertion. Addresses leave here as lowercase hex; the delivery
--- worker checksums them (EIP-55) before signing the body.
+-- bound wallet and address; never the payer's free-text or any payer
+-- assertion. The expected email is the mailbox the merchant themselves
+-- named, so it goes back to them in the verification object. Addresses
+-- leave here as lowercase hex; the delivery worker checksums them (EIP-55)
+-- before signing the body.
 CREATE FUNCTION webhook_deposit_request_object(invoice invoices) RETURNS JSONB
 LANGUAGE SQL STABLE AS $$
     SELECT jsonb_build_object(
@@ -1292,8 +1316,12 @@ LANGUAGE SQL STABLE AS $$
         'metadata', invoice.metadata,
         'customer_id', 'cus_' || invoice.customer_id::text,
         'issuer_id', 'iss_' || invoice.issuer_id::text,
-        'payer_policy_mode', invoice.payer_policy_mode,
-        'payer_reference', invoice.payer_reference,
+        'verification', jsonb_build_object(
+            'email', CASE WHEN invoice.expected_email IS NULL THEN NULL
+                          ELSE jsonb_build_object('expected_email', invoice.expected_email) END,
+            'merchant_auth', CASE WHEN invoice.payer_reference IS NULL THEN NULL
+                                  ELSE jsonb_build_object('payer_reference', invoice.payer_reference) END,
+            'wallet_attestation', invoice.wallet_attestation_required),
         'verification_completed_at', webhook_rfc3339(invoice.verification_completed_at),
         'likely_unsolicited_at', webhook_rfc3339(invoice.likely_unsolicited_at),
         'payer_wallet', CASE WHEN invoice.payer_wallet IS NULL THEN NULL
@@ -1306,6 +1334,7 @@ LANGUAGE SQL STABLE AS $$
                 THEN invoice.issuance_snapshot->'networks'->0->>'chain_id'
             ELSE NULL END,
         'wallet_bound_at', webhook_rfc3339(invoice.wallet_bound_at),
+        'ready_at', webhook_rfc3339(invoice.ready_at),
         'expires_at', webhook_rfc3339(to_timestamp(invoice.expiration_timestamp)),
         'created_at', webhook_rfc3339(invoice.created_at))
 $$;
@@ -1356,9 +1385,12 @@ BEGIN
       NEW.verification_completed_at, jsonb_build_object('deposit_request', deposit_request));
   END IF;
 
-  IF NEW.wallet_bound_at IS NOT NULL AND OLD.wallet_bound_at IS NULL THEN
+  -- The address exists and deposits may arrive: on insert for a
+  -- permissionless request whose network was pinned or already chosen, or on
+  -- the wallet binding / network selection that registers the address.
+  IF NEW.ready_at IS NOT NULL AND OLD.ready_at IS NULL THEN
     PERFORM enqueue_invoice_webhook_event(NEW.account_id, NEW.id, 'deposit_request.ready',
-      NEW.wallet_bound_at, jsonb_build_object('deposit_request', deposit_request));
+      NEW.ready_at, jsonb_build_object('deposit_request', deposit_request));
   END IF;
 
   IF NEW.likely_unsolicited_at IS NOT NULL AND OLD.likely_unsolicited_at IS NULL THEN
@@ -1370,7 +1402,7 @@ BEGIN
 END $$;
 
 CREATE TRIGGER invoice_webhook_transition
-AFTER UPDATE OF status, attention_reason, verification_completed_at, wallet_bound_at, likely_unsolicited_at ON invoices
+AFTER INSERT OR UPDATE OF status, attention_reason, verification_completed_at, ready_at, likely_unsolicited_at ON invoices
 FOR EACH ROW EXECUTE FUNCTION enqueue_payment_webhook();
 
 -- One event per ledger row, written in the transaction that records the

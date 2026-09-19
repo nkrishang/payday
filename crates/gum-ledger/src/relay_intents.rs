@@ -639,10 +639,28 @@ async fn unpark_unless_pending(
 mod tests {
     use super::*;
     use crate::invoices::tests::{account, insert_bound, issuance_input, test_payer_wallet};
-    use crate::{DbInvoice, InvoiceRepository, PaymentObservation, ProofRepository};
+    use crate::{
+        AccountId, CreateInvoiceInput, DbInvoice, InvoiceRepository, PaymentObservation,
+        ProofRepository,
+    };
+    use gum_core::PayerVerification;
 
     const CHAIN: u64 = 1;
     const ORIGIN: u64 = 8453;
+
+    /// A wallet-attested request: parking and flagging semantics exist only
+    /// for requests that attested the wallet they are paid from; a
+    /// permissionless request accepts any incoming deposit outright.
+    fn attested_input(owner: AccountId, key: &str) -> CreateInvoiceInput {
+        let mut input = issuance_input(owner, key, None);
+        let verification = PayerVerification {
+            wallet_attestation: true,
+            ..Default::default()
+        };
+        input.issuance_snapshot.payer_verification = verification.clone();
+        input.payer_verification = verification;
+        input
+    }
 
     fn solver() -> Address {
         Address::repeat_byte(0x50)
@@ -749,9 +767,8 @@ mod tests {
         let owner = account(&pool, 1).await;
         let invoices = InvoiceRepository::new(pool.clone());
         let intents = RelayIntentRepository::new(pool.clone());
-        let quoted_only =
-            insert_bound(&pool, &issuance_input(owner, "quoted-only", None), None).await;
-        let paid = insert_bound(&pool, &issuance_input(owner, "relayed", None), None).await;
+        let quoted_only = insert_bound(&pool, &attested_input(owner, "quoted-only"), None).await;
+        let paid = insert_bound(&pool, &attested_input(owner, "relayed"), None).await;
 
         // A quote alone explains nothing: the transfer is flagged as usual.
         intents.insert(&intent(&quoted_only, 0x01)).await.unwrap();
@@ -918,7 +935,7 @@ mod tests {
         let owner = account(&pool, 1).await;
         let invoices = InvoiceRepository::new(pool.clone());
         let intents = RelayIntentRepository::new(pool.clone());
-        let paid = insert_bound(&pool, &issuance_input(owner, "relay-failed", None), None).await;
+        let paid = insert_bound(&pool, &attested_input(owner, "relay-failed"), None).await;
         let sent = intents.insert(&intent(&paid, 0x04)).await.unwrap();
         intents
             .mark_sent(
@@ -1214,8 +1231,8 @@ mod tests {
         let owner = account(&pool, 1).await;
         let invoices = InvoiceRepository::new(pool.clone());
         let intents = RelayIntentRepository::new(pool.clone());
-        let first = insert_bound(&pool, &issuance_input(owner, "log-first", None), None).await;
-        let second = insert_bound(&pool, &issuance_input(owner, "log-second", None), None).await;
+        let first = insert_bound(&pool, &attested_input(owner, "log-first"), None).await;
+        let second = insert_bound(&pool, &attested_input(owner, "log-second"), None).await;
         let origin = B256::repeat_byte(0xBE);
         let origin_b = B256::repeat_byte(0xBD);
 
@@ -1316,7 +1333,7 @@ mod tests {
         let owner = account(&pool, 1).await;
         let invoices = InvoiceRepository::new(pool.clone());
         let intents = RelayIntentRepository::new(pool.clone());
-        let paid = insert_bound(&pool, &issuance_input(owner, "reconciled", None), None).await;
+        let paid = insert_bound(&pool, &attested_input(owner, "reconciled"), None).await;
         let quote = intents.insert(&intent(&paid, 0x0F)).await.unwrap();
 
         // The solver's transfer for exactly the quoted amount lands, but the

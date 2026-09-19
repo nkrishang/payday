@@ -63,11 +63,11 @@ WebSocket URL from the new HTTP endpoint automatically.
 All three tasks read RPC secrets, so restart all three:
 
 ```bash
-aws ecs update-service --cluster payday --service indexer \
+aws ecs update-service --cluster gum --service indexer \
   --force-new-deployment --region "$AWS_REGION"
-aws ecs update-service --cluster payday --service api \
+aws ecs update-service --cluster gum --service api \
   --force-new-deployment --region "$AWS_REGION"
-aws ecs update-service --cluster payday --service signers \
+aws ecs update-service --cluster gum --service signers \
   --force-new-deployment --region "$AWS_REGION"
 ```
 
@@ -84,7 +84,7 @@ planned carefully as it causes a brief downtime.
    NEW_PASSWORD=$(openssl rand -base64 32 | tr -d '/+=' | head -c 32)
 
    aws rds modify-db-instance \
-     --db-instance-identifier payday \
+     --db-instance-identifier gum \
      --master-user-password "$NEW_PASSWORD" \
      --apply-immediately \
      --region "$AWS_REGION"
@@ -107,9 +107,9 @@ planned carefully as it causes a brief downtime.
 3. Wait for the RDS modification to complete, then restart the API and signers:
 
    ```bash
-   aws ecs update-service --cluster payday --service api \
+   aws ecs update-service --cluster gum --service api \
      --force-new-deployment --region "$AWS_REGION"
-   aws ecs update-service --cluster payday --service signers \
+   aws ecs update-service --cluster gum --service signers \
      --force-new-deployment --region "$AWS_REGION"
    ```
 

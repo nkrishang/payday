@@ -1,30 +1,38 @@
 # Deposit safety for merchants
 
-Gum deposit addresses are single-use and belong to one payer wallet. The
-address exists only once the payer has signed the request's attestation from
-the wallet they will pay from; it commits to that wallet, and only transfers
-from that wallet are the payer's. Give the payer the amount, deposit address,
-network, and deadline shown by the checkout, and ask them to pay from the
-wallet they signed with and not to reuse the address.
+Gum deposit addresses are single-use. How the address behaves depends on
+whether the deposit request carries the wallet-attestation add-on. Without it,
+the payer may pay from **any wallet** — an exchange withdrawal, a
+smart-contract wallet, any address they control — and every finalized
+transfer of the request's token counts. With it, the address exists only once
+the payer has signed the request's attestation from the wallet they will pay
+from; only transfers from that wallet are attributed to the payer. Either
+way, give the payer the amount, deposit address, network, and deadline shown
+by the checkout, and ask them not to reuse the address.
 
 The hosted checkout offers three ways to pay the same one-time address: the
-connected wallet (which refuses to send from any wallet but the attested
-one), a scanned QR, or a copied address. All three request the amount still
-due and stop being offered the moment the deposit request is no longer payable.
+connected wallet, a scanned QR, or a copied address. All three request the
+amount still due and stop being offered the moment the deposit request is no
+longer payable. On a wallet-attested request the connected wallet refuses to
+send from any wallet but the attested one.
 
 ## What the payer must send
 
 - Send **exactly the displayed amount** of the **request's stablecoin** (the
   displayed `token`: USDC, or USDT — shown as `USDT0` on Monad and Arbitrum
-  One) on the **network they chose** to the displayed deposit address, **from
-  the wallet that signed the attestation**. The choice is made before signing and is
-  final: the address exists on that chain only. Money from any other wallet still counts toward the
-  amount and settles, but the deposit request is flagged `likely_unsolicited`, no Proof
-  of Deposit is issued for it, and anything returned goes to the attested
-  wallet, not the sending one. The one way to pay from another network is
-  the hosted checkout's "Pay from another network": Gum quotes the route
-  through Relay for the attested wallet, and the delivery Relay's solver
-  makes is attributed to that wallet once Relay confirms it sent the deposit.
+  One) on the **network they chose** to the displayed deposit address. **From
+  any wallet, unless the request carries wallet attestation** — then, from
+  the wallet that signed the attestation. On a wallet-attested request the
+  choice of wallet and network is made before signing and is final: the
+  address exists on that chain only. Money from any other wallet still counts
+  toward the amount and settles, but the deposit request is flagged
+  `likely_unsolicited`, and no Proof of Payment is issued for it. On a
+  request without wallet attestation nothing is ever flagged: any sender is
+  good. The one way to pay from another network is the hosted checkout's
+  "Pay from another network"; it is unavailable on wallet-attested requests,
+  because a relay solver pays from a different wallet. Where it is offered,
+  Gum quotes the route through Relay, and the delivery Relay's solver
+  makes settles as usual.
 - Verify the network and token contract in the wallet before approving the
   transfer. Token names and symbols are not sufficient; bridged wrappers (such
   as `USDC.e`), look-alike tokens, the other stablecoin, and the same token on
@@ -51,10 +59,11 @@ Wrong assets may be unrecoverable. Two cases are recoverable. A transfer of
 the *other* Gum-served stablecoin to the address (USDC to a USDT address,
 or the reverse) is observed but never credited; it stays at the address, and
 `recover(address)` on the deployed deposit contract — callable by anyone —
-returns it to the payer's attested wallet. A deposit of the right token to
+forwards it to Gum's recovery custody. A deposit of the right token to
 the address on another *supported* network is refused by the contract rather
-than settled, and Gum's operator can return it to the payer's attested
-wallet by hand (`runbooks/wrong-network-deposit.md`); treat that as a support
+than settled, and Gum's operator can recover it into custody by hand and
+have it returned to the payer after review
+(`runbooks/wrong-network-deposit.md`); treat that as a support
 case, not a feature. Do not promise recovery of anything else unless the
 relevant wallet or token is demonstrably under your control.
 
@@ -64,35 +73,40 @@ relevant wallet or token is demonstrably under your control.
   requested amount is reached. On pre-expiry execution, exactly the deposit request
   amount of its token is sent to the payout address.
 - **Partial deposit:** multiple transfers can accumulate. If the total is still
-  short when the deposit request expires, the complete balance is returned
-  to the payer's attested wallet.
+  short when the deposit request expires, the complete balance is recovered
+  into Gum's recovery custody.
 - **Overpayment before expiry:** the payout address receives exactly the
-  requested amount; the remainder is returned to the payer's attested wallet.
-- **Late deposit:** the funds are returned to the payer's attested wallet.
+  requested amount; the remainder is recovered into Gum's recovery custody.
+- **Late deposit:** the funds are recovered into Gum's recovery custody.
   This also applies to funds sent after the deposit address has already been
   swept.
 
 The on-chain boundary is inclusive: execution at the deposit request's expiration
 timestamp can settle a fully funded deposit request; execution with a later block
-timestamp returns its balance to the payer's wallet. Finality, indexer,
+timestamp recovers its balance into custody. Finality, indexer,
 network, or sweep delays can therefore affect the eventual route even when a
 payer initiated a transfer earlier.
 
-## No custody
+## Recovery
 
-The intended requested amount never passes through Gum: it moves directly from
-the one-time address to the payout address. Neither do returns: the payer's
-attested wallet is the address's recovery term, so overpayment remainders,
-expired balances, and late transfers go back to the payer on-chain, without
-anyone holding them. Every returned amount is recorded against its deposit and
-reported by a `deposit_request.recovered_funds` webhook. The one case a payer should
-know about: funds sent from a wallet other than the attested one are returned
-to the attested wallet, never to the sender.
+The recovery term of every deposit address is Gum's dedicated KMS recovery
+wallet, in every case — including on a wallet-attested request. Overpayment
+remainders, expired balances, late transfers, and wrong-network or wrong-token
+recoveries land in that custody on-chain, and Gum then returns the funds to
+the payer **manually, after review**. Funds are never returned automatically
+on-chain to the payer's wallet, and the payer's wallet is never the recovery
+term. The intended requested amount still never passes through Gum: it
+moves directly from the one-time address to the payout address. Every
+recovered amount is recorded against its deposit and reported by a
+`deposit_request.recovered_funds` webhook. A payer who sent from a wallet
+other than the one they attested — on a wallet-attested request — is returned
+their funds through the same review process.
 
 ## Merchant responsibility
 
-Reconcile payout-address receipts against orders, and treat a
-`deposit_request.likely_unsolicited` event as a prompt to check who actually paid: the
+Reconcile payout-address receipts against orders, and — on a wallet-attested
+request — treat a `deposit_request.likely_unsolicited` event as a prompt to
+check who actually paid: the
 attested wallet did not. Refunds of amounts that settled to your payout address
 remain your own process. Before accepting deposits, verify that your
 organization controls the payout address.

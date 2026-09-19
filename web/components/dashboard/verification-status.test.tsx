@@ -2,21 +2,30 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { VerificationBadge, VerificationStatus } from "./verification-status";
 
+const EMAIL_ONLY = { email: { expected_email: "alice@example.com" }, wallet_attestation: false };
+const MERCHANT_ONLY = { merchant_auth: { payer_reference: "user_123" }, wallet_attestation: false };
+
 describe("VerificationBadge", () => {
-  it("says a permissionless deposit request needs nothing", () => {
-    render(<VerificationBadge mode="permissionless" completedAt={null} unsolicitedAt={null} />);
+  it("says a request with no identity add-on needs nothing", () => {
+    render(
+      <VerificationBadge
+        verification={{ wallet_attestation: true }}
+        completedAt={null}
+        unsolicitedAt={null}
+      />,
+    );
     expect(screen.getByText("Not required")).toBeInTheDocument();
   });
 
-  it("keeps a gated deposit request pending until the gateway records completion", () => {
+  it("keeps an identity-gated request pending until the gateway records completion", () => {
     const { rerender } = render(
-      <VerificationBadge mode="verified_email" completedAt={null} unsolicitedAt={null} />,
+      <VerificationBadge verification={EMAIL_ONLY} completedAt={null} unsolicitedAt={null} />,
     );
     expect(screen.getByText("Pending")).toBeInTheDocument();
 
     rerender(
       <VerificationBadge
-        mode="verified_email"
+        verification={EMAIL_ONLY}
         completedAt="2026-08-19T08:30:00Z"
         unsolicitedAt={null}
       />,
@@ -27,7 +36,7 @@ describe("VerificationBadge", () => {
   it("flags funds that arrived before verification without changing the verification verdict", () => {
     render(
       <VerificationBadge
-        mode="verified_email"
+        verification={EMAIL_ONLY}
         completedAt={null}
         unsolicitedAt="2026-08-26T11:00:00Z"
       />,
@@ -38,10 +47,10 @@ describe("VerificationBadge", () => {
 });
 
 describe("VerificationStatus", () => {
-  it("shows the app's own payer reference for a merchant-session policy, and no email", () => {
+  it("shows the app's own payer reference for merchant auth, and no email", () => {
     render(
       <VerificationStatus
-        policy={{ mode: "merchant_session", payer_reference: "user_123" }}
+        verification={MERCHANT_ONLY}
         completedAt="2026-08-19T08:30:00Z"
         unsolicitedAt={null}
       />,
@@ -53,15 +62,17 @@ describe("VerificationStatus", () => {
     expect(screen.getByText("Verified")).toBeInTheDocument();
   });
 
-  it("keeps a merchant-session request pending until its app opens it", () => {
-    render(<VerificationBadge mode="merchant_session" completedAt={null} unsolicitedAt={null} />);
+  it("keeps a merchant-auth request pending until its app opens it", () => {
+    render(
+      <VerificationBadge verification={MERCHANT_ONLY} completedAt={null} unsolicitedAt={null} />,
+    );
     expect(screen.getByText("Pending")).toBeInTheDocument();
   });
 
-  it("shows the merchant's own assertion for a verified email policy", () => {
+  it("shows the expected mailbox for an email-gated request", () => {
     render(
       <VerificationStatus
-        policy={{ mode: "verified_email", expected_email: "alice@example.com" }}
+        verification={EMAIL_ONLY}
         completedAt="2026-08-19T08:30:00Z"
         unsolicitedAt={null}
       />,
@@ -72,10 +83,22 @@ describe("VerificationStatus", () => {
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
+  it("shows wallet attestation as its own row, separate from the identity verdict", () => {
+    render(
+      <VerificationStatus
+        verification={{ wallet_attestation: true }}
+        completedAt={null}
+        unsolicitedAt={null}
+      />,
+    );
+    expect(screen.getAllByText("Wallet attestation").length).toBeGreaterThan(0);
+    expect(screen.getByText("Not required")).toBeInTheDocument();
+  });
+
   it("explains a likely unsolicited deposit", () => {
     render(
       <VerificationStatus
-        policy={{ mode: "verified_email", expected_email: "bob@example.com" }}
+        verification={{ email: { expected_email: "bob@example.com" }, wallet_attestation: true }}
         completedAt={null}
         unsolicitedAt="2026-08-26T11:00:00Z"
       />,

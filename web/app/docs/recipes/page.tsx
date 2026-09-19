@@ -25,7 +25,7 @@ app.post("/deposits", requireUser, async (req, res) => {
       payer: { name: req.user.displayName },
       heading: "Account top-up",
       reference: \`topup-\${req.user.id}-\${Date.now()}\`,
-      payer_policy: { mode: "merchant_session", payer_reference: req.user.id },
+      verification: { merchant_auth: { payer_reference: req.user.id } },
       expires_in: 3600,
     },
     \`topup-\${req.user.id}-\${req.body.nonce}\`, // idempotency key from the client's nonce
@@ -55,7 +55,7 @@ const CREDIT_WEBHOOK = `app.post("/gum/webhook", rawJson, async (req, res) => {
 const CREDIT_RETURN = `// The user comes back to /deposits/:id later: mint a fresh secret and redirect again.
 app.get("/deposits/:id", requireUser, async (req, res) => {
   const deposit = await gum.depositRequests.get(req.params.id);
-  if (deposit.payer_policy.mode !== "merchant_session" || deposit.payer_policy.payer_reference !== req.user.id) {
+  if (deposit.verification.merchant_auth?.payer_reference !== req.user.id) {
     return res.status(404).end();
   }
   const { client_secret } = await gum.depositRequests.createClientSecret(deposit.id);
@@ -78,7 +78,7 @@ const request = await gum.depositRequests.create(
     reference: "INV-1042",
     notes: "Net 30. Thank you.",
     attachment_id: pdf.id,
-    payer_policy: { mode: "verified_email", expected_email: "ap@globex.example" },
+    verification: { email: { expected_email: "ap@globex.example" } },
     expires_in: 30 * 24 * 3600,
   },
   "INV-1042",                         // reuse the invoice number: a retry never double-issues
@@ -108,7 +108,7 @@ curl -fsS "$API/v1/deposit-requests" \\
     \\"payout_address\\": \\"0x1111…\\", \\"issuer\\": { \\"name\\": \\"Acme LLC\\" }, \\"customer_id\\": \\"cus_…\\",
     \\"heading\\": \\"Consulting, March\\", \\"reference\\": \\"INV-1042\\",
     \\"attachment_id\\": \\"$ATT_ID\\",
-    \\"payer_policy\\": { \\"mode\\": \\"verified_email\\", \\"expected_email\\": \\"ap@globex.example\\" },
+    \\"verification\\": { \\"email\\": { \\"expected_email\\": \\"ap@globex.example\\" } },
     \\"expires_in\\": 2592000
   }"`;
 
@@ -132,14 +132,13 @@ for (const t of transfers) console.log(t.sender, t.amount, t.disposition, t.tran
 const SETUP = `// Save your customers once; each supplies the payer party on later requests.
 const globex = await gum.customers.create({ name: "Globex", email: "ap@globex.example" });
 
-// From then on, a request is the amount, who pays, and the policy:
+// From then on, a request is the amount, who pays, and nothing else:
 await gum.depositRequests.create(
   {
     amount: "10.00",
     payout_address: "0x1111…",
     issuer: { name: "Acme LLC" },
     customer_id: globex.id,
-    payer_policy: { mode: "permissionless" },
   },
   crypto.randomUUID(),
 );`;

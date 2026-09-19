@@ -51,6 +51,9 @@ pub struct AppState {
     pub payer_verification: Option<PayerVerification>,
     /// The networks a deposit request may be paid on.
     pub networks: Arc<ChainRegistry>,
+    /// Gum's own recovery wallet: the recovery term every payment contract
+    /// commits to, fixed at issuance and never a payer's.
+    pub recovery_address: Address,
     /// Cross-chain payments through Relay; `None` without
     /// `GUM_RELAY_API_KEY`, and the relay routes answer `relay_unavailable`.
     pub relay: Option<Arc<RelayService>>,
@@ -88,6 +91,7 @@ impl AppState {
         accounts: AccountRepository,
         merchant_verifier: Option<PrivyVerifier>,
         networks: Arc<ChainRegistry>,
+        recovery_address: Address,
         payer: PayerAccess,
         api_key_prefix: String,
         webhook_encryption_key: Option<[u8; 32]>,
@@ -114,6 +118,7 @@ impl AppState {
             merchant_verifier,
             payer_verification,
             networks,
+            recovery_address,
             payer,
             webhook_encryption_key,
             api_key_prefix,

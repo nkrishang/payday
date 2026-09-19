@@ -16,24 +16,24 @@ aws cloudwatch describe-alarms --region "$AWS_REGION" \
 
 | Alarm | Meaning | Runbook |
 |-------|---------|---------|
-| `payday-unhealthy-targets` | API readiness is failing | [service-restart.md](service-restart.md) |
-| `payday-api-task-count` | API container is not running | [service-restart.md](service-restart.md) |
-| `payday-indexer-task-count` | Indexer container is not running | [service-restart.md](service-restart.md) |
-| `payday-signers-task-count` | Signers container is not running | [service-restart.md](service-restart.md) |
-| `payday-indexer-chain-halted` | Indexer reported a finality violation and the chain requires an explicit resume | [indexer-fatal-halt.md](indexer-fatal-halt.md) |
-| `payday-indexer-pass-failing` | An indexer pass repeatedly failed | check provider status and indexer logs |
-| `payday-indexer-signal-down` | Transfer signal is disconnected | [quicknode-rpc-limits.md](quicknode-rpc-limits.md) |
-| `payday-signers-stalled` | A transaction reached its replacement limit | [stuck-deposit-request.md](stuck-deposit-request.md) |
-| `payday-signers-low-balance` | A signer is below its chain's low-balance level | step 7 below |
-| `payday-signers-failing` | Signing or reconciliation repeatedly failed | inspect signers logs and `execution.executor_status` |
-| `payday-signers-dead-letter` | Signers permanently rejected a bus delivery | inspect with `gum-server bus dead` |
-| `payday-server-dead-letter` | API permanently rejected a bus delivery | inspect with `gum-server bus dead` |
-| `payday-server-sweep-stuck` | An open sweep job is stale | [stuck-deposit-request.md](stuck-deposit-request.md) |
-| `payday-server-attention` | A deposit request needs operator attention | [stuck-deposit-request.md](stuck-deposit-request.md) step 5 |
-| `payday-notification-delivery-failures` | Merchant email or webhook delivery repeatedly failed | inspect gum-server logs and pending rows in `notification_outbox`; delivery retries automatically |
-| `payday-notification-missing-contact` | A deposit request needing attention has neither an email nor webhook snapshot | recover the account contact, notify the merchant manually, and inspect `notification_outbox` |
-| `payday-db-high-cpu` | RDS CPU > 80% for 15 min | scale the instance |
-| `payday-db-low-storage` | RDS has < 5 GB free storage | raise `db_max_allocated_storage` |
+| `gum-unhealthy-targets` | API readiness is failing | [service-restart.md](service-restart.md) |
+| `gum-api-task-count` | API container is not running | [service-restart.md](service-restart.md) |
+| `gum-indexer-task-count` | Indexer container is not running | [service-restart.md](service-restart.md) |
+| `gum-signers-task-count` | Signers container is not running | [service-restart.md](service-restart.md) |
+| `gum-indexer-chain-halted` | Indexer reported a finality violation and the chain requires an explicit resume | [indexer-fatal-halt.md](indexer-fatal-halt.md) |
+| `gum-indexer-pass-failing` | An indexer pass repeatedly failed | check provider status and indexer logs |
+| `gum-indexer-signal-down` | Transfer signal is disconnected | [quicknode-rpc-limits.md](quicknode-rpc-limits.md) |
+| `gum-signers-stalled` | A transaction reached its replacement limit | [stuck-deposit-request.md](stuck-deposit-request.md) |
+| `gum-signers-low-balance` | A signer is below its chain's low-balance level | step 7 below |
+| `gum-signers-failing` | Signing or reconciliation repeatedly failed | inspect signers logs and `execution.executor_status` |
+| `gum-signers-dead-letter` | Signers permanently rejected a bus delivery | inspect with `gum-server bus dead` |
+| `gum-server-dead-letter` | API permanently rejected a bus delivery | inspect with `gum-server bus dead` |
+| `gum-server-sweep-stuck` | An open sweep job is stale | [stuck-deposit-request.md](stuck-deposit-request.md) |
+| `gum-server-attention` | A deposit request needs operator attention | [stuck-deposit-request.md](stuck-deposit-request.md) step 5 |
+| `gum-notification-delivery-failures` | Merchant email or webhook delivery repeatedly failed | inspect gum-server logs and pending rows in `notification_outbox`; delivery retries automatically |
+| `gum-notification-missing-contact` | A deposit request needing attention has neither an email nor webhook snapshot | recover the account contact, notify the merchant manually, and inspect `notification_outbox` |
+| `gum-db-high-cpu` | RDS CPU > 80% for 15 min | scale the instance |
+| `gum-db-low-storage` | RDS has < 5 GB free storage | raise `db_max_allocated_storage` |
 
 Alarms derived from worker logs return to `OK` on their own once the worker
 stops reporting the condition.
@@ -41,7 +41,7 @@ stops reporting the condition.
 ## 2. Check service health
 
 ```bash
-aws ecs describe-services --cluster payday --services api indexer signers \
+aws ecs describe-services --cluster gum --services api indexer signers \
   --region "$AWS_REGION" \
   --query 'services[*].{Service:serviceName,Running:runningCount,Desired:desiredCount,Status:status}' \
   --output table
@@ -54,7 +54,7 @@ Running and Desired should match. If Running is 0, see
 
 ```bash
 # Last 30 minutes, errors and warnings only:
-aws logs tail /ecs/payday/indexer --since 30m --region "$AWS_REGION" \
+aws logs tail /ecs/gum/indexer --since 30m --region "$AWS_REGION" \
   | grep -E "WARN|ERROR|finality violation|signal|lagging|stale"
 ```
 
@@ -65,13 +65,13 @@ health is reported by `execution.executor_status` and
 ## 4. Check API logs
 
 ```bash
-aws logs tail /ecs/payday/api --since 30m --region "$AWS_REGION"
+aws logs tail /ecs/gum/api --since 30m --region "$AWS_REGION"
 ```
 
 Also check signers logs for alarm-keyed failures:
 
 ```bash
-aws logs tail /ecs/payday/signers --since 30m --region "$AWS_REGION" \
+aws logs tail /ecs/gum/signers --since 30m --region "$AWS_REGION" \
   | grep -E "signer balance is low|job deferred after a transient failure|reconciling transaction failed|broadcast failed|transaction unconfirmed|dead-lettered"
 ```
 
@@ -116,7 +116,7 @@ Monad bills
 the gas *limit* of every helper transaction (`100k + 400k × items`), so a
 full batch reserves about 8.1M gas worth of MON from the signer that sends
 it. If one signer runs out, its submissions fail and the other signers carry
-the queue more slowly; the `payday-signers-low-balance` alarm fires
+the queue more slowly; the `gum-signers-low-balance` alarm fires
 first.
 
 ```bash

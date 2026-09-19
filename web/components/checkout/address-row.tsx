@@ -29,11 +29,18 @@ export function AddressRow({ payment }: { payment: ReadyPayerDepositRequest }) {
         <CopyButton value={payment.address} label="deposit address" className="bg-surface" />
       </div>
       <p className="mt-2 text-[12px] leading-relaxed text-faint">
-        Send from{" "}
-        <span className="font-mono text-muted" title={payment.payer_wallet}>
-          {truncateAddress(payment.payer_wallet)}
-        </span>{" "}
-        only, the wallet you signed with. Transfers from any other wallet are not credited to you.
+        {payment.payer_wallet ? (
+          <>
+            Send from{" "}
+            <span className="font-mono text-muted" title={payment.payer_wallet}>
+              {truncateAddress(payment.payer_wallet)}
+            </span>{" "}
+            only, the wallet you signed with. Transfers from any other wallet are not credited to
+            you.
+          </>
+        ) : (
+          "You can pay from any wallet: transfers from whichever wallet you send with are credited to you."
+        )}
       </p>
     </div>
   );

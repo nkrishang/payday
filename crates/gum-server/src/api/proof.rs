@@ -11,8 +11,8 @@ use axum::extract::{Path, State};
 use chrono::SecondsFormat;
 use gum_core::{
     ATTESTATION_VERSION, AttestedRelayFill, CANONICALIZATION, Invoice, InvoiceStatus,
-    PROOF_VERSION, ProofOfPayment, ProofTransfer, RelayAttribution, VerificationAttestationPayload,
-    VerificationFact,
+    PROOF_VERSION, ProofOfPayment, ProofScope, ProofTransfer, RelayAttribution,
+    VerificationAttestationPayload, VerificationFact,
 };
 use gum_ledger::AccountId;
 
@@ -20,6 +20,13 @@ use crate::api::deposit_requests::resolve_deposit_request;
 use crate::api::error::ApiError;
 use crate::api::json::Json;
 use crate::state::AppState;
+
+/// `0x`-prefixed lowercase hex of a 32-byte nonce, the form the proof and
+/// its signed attestation carry.
+fn hex_nonce(nonce: &B256) -> String {
+    // `B256`'s display is already `0x`-prefixed 32-byte hex.
+    nonce.to_string()
+}
 
 pub async fn get_proof(
     State(state): State<AppState>,
@@ -53,7 +60,15 @@ pub async fn get_proof(
         return Ok(Json(proof));
     }
     let settlement_transfers = state.proofs.settlement_transfers(row.id).await?;
-    let payer_wallet = binding.payer_wallet.to_checksum(None);
+    // The scope is the request's, not the holder's: an attested request
+    // proves its wallet's payment, a permissionless one proves settlement.
+    let scope = if invoice.wallet_attestation_required() {
+        ProofScope::WalletAttributed
+    } else {
+        ProofScope::Settlement
+    };
+    let attested_wallet = binding.wallet.as_ref().map(|wallet| &wallet.payer_wallet);
+    let payer_wallet = attested_wallet.map(|wallet| wallet.to_checksum(None));
     let transfers = settlement_transfers
         .iter()
         .map(|transfer| {
@@ -105,36 +120,45 @@ pub async fn get_proof(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
-    // The proof's claim is that the attested wallet paid: from its own
-    // address, or from another chain through Relay with the origin verified
-    // as that wallet. Money from any other wallet was credited and settled,
-    // but it is not that claim, and no proof is issued for it.
-    if transfers.iter().any(|transfer| {
-        transfer.sender != payer_wallet
-            && transfer
-                .relay
-                .as_ref()
-                .is_none_or(|relay| relay.origin_sender != payer_wallet)
-    }) {
-        return Err(ApiError::deposit_sender_mismatch());
+    // The proof's claim is scope-dependent. A wallet-attributed proof says
+    // the attested wallet paid: from its own address, or from another chain
+    // through Relay with the origin verified as that wallet. Money from any
+    // other wallet was credited and settled, but it is not that claim, and
+    // no such proof is issued for it. A settlement-scope proof makes no
+    // claim about whose wallet paid, so no sender is checked.
+    if scope == ProofScope::WalletAttributed {
+        let payer_wallet = payer_wallet
+            .as_deref()
+            .ok_or_else(|| ApiError::internal("attested request has no attested wallet"))?;
+        if transfers.iter().any(|transfer| {
+            transfer.sender != payer_wallet
+                && transfer
+                    .relay
+                    .as_ref()
+                    .is_none_or(|relay| relay.origin_sender != payer_wallet)
+        }) {
+            return Err(ApiError::deposit_sender_mismatch());
+        }
     }
-    let relay_fills = transfers
-        .iter()
-        .filter(|transfer| transfer.sender != payer_wallet)
-        .filter_map(|transfer| {
-            transfer.relay.clone().map(|relay| AttestedRelayFill {
-                transaction_hash: transfer.transaction_hash.clone(),
-                log_index: transfer.log_index.clone(),
-                relay,
+    let relay_fills = match payer_wallet.as_deref() {
+        Some(payer_wallet) => transfers
+            .iter()
+            .filter(|transfer| transfer.sender != payer_wallet)
+            .filter_map(|transfer| {
+                transfer.relay.clone().map(|relay| AttestedRelayFill {
+                    transaction_hash: transfer.transaction_hash.clone(),
+                    log_index: transfer.log_index.clone(),
+                    relay,
+                })
             })
-        })
-        .collect();
+            .collect(),
+        None => Vec::new(),
+    };
 
-    // Permissionless invoices verify no identity. Gated modes report whether
-    // the policy was satisfied; the wallet binding is a fact about every
-    // invoice, recorded with the attempt that made it.
-    let mode = invoice.issuance_snapshot.payer_policy.mode();
-    let result = if !mode.is_gated() {
+    // Identity facts: the attached add-ons only. A permissionless request
+    // has none, and the attestation signs `not_required`.
+    let verification_addons = &invoice.issuance_snapshot.payer_verification;
+    let result = if !verification_addons.is_gated() {
         "not_required"
     } else if row.verification_completed_at.is_some() {
         "approved"
@@ -147,11 +171,12 @@ pub async fn get_proof(
         .attempts_for_invoice(account.0, row.id)
         .await?;
     let mut facts = Vec::new();
-    if let Some(mailbox) = attempts
-        .iter()
-        .filter(|attempt| attempt.kind == "email" && attempt.status == "approved")
-        .filter_map(|attempt| attempt.verified_at)
-        .min()
+    if verification_addons.email.is_some()
+        && let Some(mailbox) = attempts
+            .iter()
+            .filter(|attempt| attempt.kind == "email" && attempt.status == "approved")
+            .filter_map(|attempt| attempt.verified_at)
+            .min()
     {
         facts.push(VerificationFact {
             kind: "mailbox".into(),
@@ -159,13 +184,14 @@ pub async fn get_proof(
             at: rfc3339(mailbox),
         });
     }
-    // A merchant-session request's identity fact is the merchant's own
+    // A merchant-auth request's identity fact is the merchant's own
     // sign-in, vouched for by the client secret its server released.
-    if let Some(opened) = attempts
-        .iter()
-        .filter(|attempt| attempt.kind == "merchant_session" && attempt.status == "approved")
-        .filter_map(|attempt| attempt.verified_at)
-        .min()
+    if verification_addons.merchant_auth.is_some()
+        && let Some(opened) = attempts
+            .iter()
+            .filter(|attempt| attempt.kind == "merchant_session" && attempt.status == "approved")
+            .filter_map(|attempt| attempt.verified_at)
+            .min()
     {
         facts.push(VerificationFact {
             kind: "merchant_session".into(),
@@ -173,11 +199,14 @@ pub async fn get_proof(
             at: rfc3339(opened),
         });
     }
-    facts.push(VerificationFact {
-        kind: "wallet".into(),
-        provider: "gum".into(),
-        at: binding.bound_at.clone(),
-    });
+    let wallet_evidence = binding.wallet.as_ref();
+    if let Some(wallet) = wallet_evidence {
+        facts.push(VerificationFact {
+            kind: "wallet".into(),
+            provider: "gum".into(),
+            at: wallet.bound_at.clone(),
+        });
+    }
     let verification = attestor
         .attest(VerificationAttestationPayload {
             version: ATTESTATION_VERSION.into(),
@@ -185,15 +214,17 @@ pub async fn get_proof(
             // The commitment goes into the signed bytes so the attestation
             // vouches for this invoice and this payer only, not for any
             // proof that reuses its id.
+            scope,
             attribution_hash: invoice.attribution_hash.to_string(),
+            issuance_nonce: hex_nonce(&invoice.issuance_nonce),
             chain_id: binding.network.chain_id.to_string(),
             payment_address: binding.payment_address.0.to_checksum(None),
-            payer_wallet: binding.payer_wallet.to_checksum(None),
-            wallet_nonce: binding.attestation.typed_data.message.nonce.clone(),
-            payer_policy_mode: mode.as_str().into(),
+            payer_wallet: payer_wallet.clone(),
+            wallet_nonce: wallet_evidence
+                .map(|wallet| wallet.attestation.typed_data.message.nonce.clone()),
             result: result.into(),
             verified_at: row.verification_completed_at.map(rfc3339),
-            wallet_bound_at: binding.bound_at.clone(),
+            wallet_bound_at: wallet_evidence.map(|wallet| wallet.bound_at.clone()),
             facts,
             relay_fills,
         })
@@ -206,10 +237,12 @@ pub async fn get_proof(
     let proof = ProofOfPayment {
         version: PROOF_VERSION.into(),
         payment_id: invoice.id.to_string(),
+        scope,
         canonical_issuance_snapshot: invoice.issuance_snapshot.clone(),
         canonicalization: CANONICALIZATION.into(),
         attribution_hash: invoice.attribution_hash.to_string(),
-        payer_wallet: binding.attestation.clone(),
+        issuance_nonce: hex_nonce(&invoice.issuance_nonce),
+        payer_wallet: wallet_evidence.map(|wallet| wallet.attestation.clone()),
         salt: binding.salt.0.to_string(),
         chain_id: binding.network.chain_id.to_string(),
         factory_address: binding.network.factory.0.to_checksum(None),

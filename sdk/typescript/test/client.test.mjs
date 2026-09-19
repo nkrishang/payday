@@ -22,7 +22,7 @@ const request = {
   payout_address: "0x1111111111111111111111111111111111111111",
   issuer: { name: "Acme LLC", email: "billing@acme.example" },
   payer: { name: "Customer Inc", details: "12 Main St" },
-  payer_policy: { mode: "verified_email", expected_email: "alice@example.com" },
+  verification: { email: { expected_email: "alice@example.com" }, wallet_attestation: true },
   heading: "March retainer",
   expires_in: 3600,
 };
@@ -53,7 +53,7 @@ test("create sends exactly the invoice fields, never a refund address or memo", 
   assert.equal("refund_address" in sent, false);
   assert.equal("memo" in sent, false);
   assert.deepEqual(Object.keys(sent).sort(), [
-    "amount", "expires_in", "heading", "issuer", "payer", "payer_policy", "payout_address",
+    "amount", "expires_in", "heading", "issuer", "payer", "payout_address", "verification",
   ]);
 });
 
@@ -372,11 +372,11 @@ test("create may name saved records instead of inline parties", async () => {
   const mock = mockFetch(() => json({ id: "dr_1", status: "awaiting_deposit" }, 201));
   const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
   await client.depositRequests.create(
-    { amount: "10.00", issuer_id: "iss-1", customer_id: "cus-1", payer_policy: { mode: "permissionless" } },
+    { amount: "10.00", issuer_id: "iss-1", customer_id: "cus-1", verification: { wallet_attestation: true } },
     "order-124",
   );
   assert.deepEqual(JSON.parse(mock.calls[0].init.body), {
-    amount: "10.00", issuer_id: "iss-1", customer_id: "cus-1", payer_policy: { mode: "permissionless" },
+    amount: "10.00", issuer_id: "iss-1", customer_id: "cus-1", verification: { wallet_attestation: true },
   });
 });
 
@@ -398,10 +398,10 @@ test("API errors expose stable code, requestId, and HTTP status", async () => {
 
 test("verification detail uses the payment sub-route", async () => {
   const detail = {
-    payer_policy_mode: "verified_email",
+    verification: { email: { expected_email: "alice@example.com" }, wallet_attestation: false },
     verification_completed_at: "2026-09-01T00:01:00Z",
     likely_unsolicited_at: null,
-    facts: { email: "approved", merchant_session: "not_required", complete: true },
+    facts: { email: "approved", wallet: "not_required", merchant_session: "not_required", complete: true },
     attempts: [{
       id: "v1", kind: "email", status: "approved",
       verified_at: "2026-09-01T00:01:00Z", created_at: "2026-09-01T00:00:00Z",
@@ -419,11 +419,11 @@ test("verification detail uses the payment sub-route", async () => {
   for (const call of mock.calls) assert.equal(call.init.headers.Authorization, "Bearer k");
 });
 
-test("a merchant-session deposit request returns its client secret once and mints more on request", async () => {
+test("a merchant-auth deposit request returns its client secret once and mints more on request", async () => {
   const issued = {
     id: "dr_1",
     deposit_url: "https://gum.money/pay/dr_1",
-    payer_policy: { mode: "merchant_session", payer_reference: "user_123" },
+    verification: { merchant_auth: { payer_reference: "user_123" }, wallet_attestation: false },
     client_secret: "cs_first",
     client_secret_expires_at: "2026-09-01T00:15:00Z",
   };
@@ -435,15 +435,15 @@ test("a merchant-session deposit request returns its client secret once and mint
   const client = new GumClient({ apiKey: "k", baseUrl: "https://example.test", fetch: mock.fetch });
 
   const created = await client.depositRequests.create(
-    { ...request, payer_policy: { mode: "merchant_session", payer_reference: "user_123" } },
+    { ...request, verification: { merchant_auth: { payer_reference: "user_123" } } },
     "first",
   );
   assert.equal(created.client_secret, "cs_first");
   assert.equal(checkoutUrl(created, created.client_secret), "https://gum.money/pay/dr_1#cs=cs_first");
-  assert.deepEqual(JSON.parse(mock.calls[0].init.body).payer_policy, { mode: "merchant_session", payer_reference: "user_123" });
+  assert.deepEqual(JSON.parse(mock.calls[0].init.body).verification, { merchant_auth: { payer_reference: "user_123" } });
 
   const replayed = await client.depositRequests.create(
-    { ...request, payer_policy: { mode: "merchant_session", payer_reference: "user_123" } },
+    { ...request, verification: { merchant_auth: { payer_reference: "user_123" } } },
     "replay",
   );
   assert.equal(replayed.client_secret, undefined);

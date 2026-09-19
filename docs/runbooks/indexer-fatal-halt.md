@@ -4,7 +4,7 @@ The indexer reports a fault when the hash at its cursor no longer matches the
 canonical chain. Gum-server records the fault and publishes chain control;
 nothing is scheduled or signed on that chain until an operator repairs the
 cursor and explicitly resumes it. This triggers the
-`payday-indexer-chain-halted` CloudWatch alarm. See
+`gum-indexer-chain-halted` CloudWatch alarm. See
 [`docs/architecture.md`](../architecture.md) for service ownership.
 
 ## Common causes
@@ -18,7 +18,7 @@ cursor and explicitly resumes it. This triggers the
 ## Step 1: Read the error
 
 ```bash
-aws logs tail /ecs/payday/indexer --since 30m --region "$AWS_REGION" \
+aws logs tail /ecs/gum/indexer --since 30m --region "$AWS_REGION" \
   | grep -E "finality violation; chain halted|chain_id"
 ```
 
@@ -62,7 +62,7 @@ Confirm `GET /v1/status` reports the chain running and watch all three logs with
 the incident's `correlation_id` as new work moves through the system:
 
 ```bash
-aws logs tail /ecs/payday/indexer --since 5m --region "$AWS_REGION"
-aws logs tail /ecs/payday/api --since 5m --region "$AWS_REGION"
-aws logs tail /ecs/payday/signers --since 5m --region "$AWS_REGION"
+aws logs tail /ecs/gum/indexer --since 5m --region "$AWS_REGION"
+aws logs tail /ecs/gum/api --since 5m --region "$AWS_REGION"
+aws logs tail /ecs/gum/signers --since 5m --region "$AWS_REGION"
 ```

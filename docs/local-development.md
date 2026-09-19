@@ -3,10 +3,14 @@
 ## System overview
 
 The API creates a deposit request; its counterfactual CREATE3 deposit address is
-derived once the payer attests, from the hosted page, the wallet they will
-pay from (`POST /v1/payer/deposit-requests/{id}/wallet/challenge` and `/attest`),
-because the address commits to that wallet as its recovery term and to the
-signature through the salt. The payer transfers the request's currency to
+derived once the request's network is fixed — in the create response when
+`chain_id` is pinned, otherwise after the payer's network selection on the
+hosted page (`POST /v1/payer/deposit-requests/{id}/network`), and, when the
+request carries the wallet-attestation add-on, only after the payer signs the
+EIP-712 attestation from the wallet they will pay from
+(`POST /v1/payer/deposit-requests/{id}/wallet/challenge` and `/attest`). The
+salt commits to the issued document, a server-generated issuance nonce, and —
+where the add-on is attached — the attestation's digest. The payer transfers the request's currency to
 that address. `gum-indexer` reads finalized ranges of
 `Transfer(address,address,uint256)` logs from every stablecoin contract
 configured on the chain and reports each range, with its observations, to
@@ -21,10 +25,11 @@ publishes one `SweepBatch` command per job on the Postgres bus;
 `gum-signers` executes it against `BatchSweeper`. For an address without
 code it calls `PaymentFactory.execute`, which deploys `DepositRequest` at the
 counterfactual address; before expiry the constructor pays the beneficiary
-exactly the requested amount and sends any remainder back to the payer's
-wallet, and after expiry it sends the whole balance to that wallet. For an
+exactly the requested amount and sends any remainder to the address's
+recovery term, Gum's dedicated KMS recovery wallet, and after expiry it
+sends the whole balance there. For an
 address that already has code it calls `Deposit.recover`, which forwards
-anything that arrived later to the payer's wallet. The finalized receipt
+anything that arrived later to that same recovery custody. The finalized receipt
 decides the outcome, which the signers report as evidence in a
 `SweepFinalized` event and the server turns into transitions: `Settled` →
 `fulfilled` (with the overpayment recovered), `Returned` → `recovered`,
@@ -35,9 +40,11 @@ Every nonzero recovery is written to the `recovered_funds` ledger in the
 transaction that applies the event, and each ledger row raises a
 `deposit_request.recovered_funds` webhook.
 
-The recovery wallet is the payer's attested wallet, never a configured or
-requested value: `gum-server` rejects a create request that carries
-`refund_address`.
+The recovery wallet is Gum's own dedicated KMS recovery wallet
+(`GUM_RECOVERY_ADDRESS`), never a payer-chosen or per-request value:
+`gum-server` rejects a create request that carries `refund_address`. Gum
+returns recovered funds to the payer manually, after review; the on-chain
+return goes to custody, not to the payer's wallet.
 
 ```
 created → funded → fulfilled
@@ -175,19 +182,23 @@ the development identity provider, printed in its log.
 
 ## Local Anvil end-to-end run
 
-`scripts/e2e-anvil.sh` runs the complete flow (the payer's wallet binding,
+`scripts/e2e-anvil.sh` runs the complete flow (the payer's wallet attestation on
+a wallet-attested request,
 signed with `cast` exactly as a wallet signs EIP-712 typed data; exact,
 partial, and batched deposits; an overpayment split between the beneficiary
-and the payer's wallet; late transfers; third-party execution; a paused
+and recovery custody; late transfers; third-party execution; a paused
 token; a blacklisted beneficiary and its operator release; an expired partial
-deposit returned automatically and completed late; a gated request whose
-wallet step follows its email verification; funds from a stranger's wallet
-flagged and refused a proof; the `recovered_funds` ledger and its webhook
+deposit recovered automatically and completed late; a gated request whose
+wallet step follows its email verification; funds from a stranger's wallet —
+on a wallet-attested request — flagged and refused a proof; an unattested
+request paid from any wallet without a flag; the `recovered_funds` ledger and
+its webhook
 events; a request bound and settled on the second chain; a challenge for a
 chain the request does not offer refused with `422`; a create carrying
-`chain_id` refused with `400`; an idle chain fast-forwarding without a
+`chain_id` refused with `400`; an unpinned, unattested request whose address
+exists at issuance; an idle chain fast-forwarding without a
 scan; and a deposit sent to an address on the wrong chain, refused by the
-contract and returned to the payer by hand exactly as
+contract and recovered by hand exactly as
 `docs/runbooks/wrong-network-deposit.md` does it) against two fresh Anvils
 started with `--slots-in-an-epoch 1 --block-time 1`, which makes the
 node's `finalized` tag advance like a real chain, and a fresh MinIO
@@ -234,8 +245,9 @@ It deploys:
 `MockStablecoin` (`foundry/src/MockStablecoin.sol`, formerly `MockUSDC`)
 takes its name and symbol in the constructor. Anvil accounts #0 and #1 are
 topped up to 1,000,000 of each test stablecoin. Account #1 is
-the end-to-end suite's payer, whose wallet every request is bound to; account
-#5 plays the stranger who pays from an unattested wallet. The runner lists
+the end-to-end suite's payer, whose wallet every wallet-attested request is
+bound to; account
+#5 plays the stranger who pays from a wallet other than the attested one. The runner lists
 both tokens on the first chain and USDC alone on the second, and hands the
 Relay stand-in both addresses as `RELAY_STUB_USDC` and `RELAY_STUB_USDT`.
 
@@ -323,17 +335,21 @@ curl -fsS http://127.0.0.1:3000/v1/deposit-requests \
   -H "Content-Type: application/json" -H "Idempotency-Key: local-1" \
   -d '{"amount": "1.5", "payout_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
        "issuer": {"name": "Local"}, "payer": {"name": "Payer"},
-       "payer_policy": {"mode": "permissionless"}, "expires_in": 3600}'
+       "verification": {"wallet_attestation": true}, "expires_in": 3600}'
 ```
 
 The response's `currency` is `USDC` (pass `"currency": "USDT"` with
 `"chain_id": "31337"` for a USDT request, which the first Anvil alone
 serves); `chain`, `token`, and `address` are null and `networks` lists
-both Anvils: bind the payer's wallet first, as the hosted checkout does
+both Anvils: with the wallet-attestation add-on attached, bind the payer's
+wallet first, as the hosted checkout does
 (challenge with `{"wallet", "chain_id": "31337"}`, sign the typed data with
 `cast wallet sign --data --from-file`, attest; `scripts/e2e-anvil.sh`'s
-`bind_payer_wallet` is the reference). `recovery_address` is then that
-wallet; there is no flag to choose it, nor one to choose the chain.
+`bind_payer_wallet` is the reference). Omit the add-on — `"verification": {}`
+or none at all — and the address exists as soon as the network is fixed: pin
+`chain_id` and it is in this response already. `recovery_address` is always
+Gum's recovery custody (`GUM_RECOVERY_ADDRESS`); there is no flag to
+choose it.
 
 Copy `id` and, after the binding, `address` from `GET /v1/deposit-requests/{id}`,
 then transfer 1.5 USDC (`1500000` atomic units) from the bound wallet:
@@ -399,10 +415,10 @@ forge test
 just web-check   # SDK and web app: build, types, lint, unit tests
 ```
 
-Coverage includes the payer wallet binding and Proof of Payment v2 (the
+Coverage includes the payer wallet attestation and Proof of Payment v5 (the
 EIP-712 digest is pinned against viem in `web/lib/payer-attestation.test.ts`);
 exact, partial, and overpayment funding; the overpayment split between
-beneficiary and the payer's wallet and the `recovered_funds` ledger;
+beneficiary and the recovery custody and the `recovered_funds` ledger;
 deployment code-hash and bound-factory verification at startup; finality-tag
 and confirmation gating; multi-range draining; range replay idempotency; chain
 isolation; expiry by block timestamp; settlement, recovery, third-party
@@ -547,6 +563,13 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   comma-separated, one per pool signer; `gum-signers` uses its ambient ECS
   task role for `kms:GetPublicKey` and `kms:Sign` on each. Only
   `gum-signers` reads either signer variable
+- `GUM_RECOVERY_ADDRESS` — the Ethereum address of Gum's dedicated KMS
+  recovery wallet, committed into every deposit address as its recovery term.
+  Overpayment remainders, expired balances, late transfers, and manual
+  recoveries land there on-chain; returning them to the payer is a manual
+  operator step signed with that key (see `docs/production-runbook.md` and
+  `docs/runbooks/wrong-network-deposit.md`). Required in production; the
+  local stack sets it to a runner-held Anvil account
 - `GUM_ATTACHMENT_BUCKET` — S3 bucket holding deposit request PDFs;
   `gum-attachments-local` on the runner's MinIO
 - `GUM_ATTACHMENT_S3_ENDPOINT`, `GUM_ATTACHMENT_S3_FORCE_PATH_STYLE` —
@@ -571,7 +594,8 @@ Terraform source is under `infra/`.
 - One exact contract per currency per configured chain; for USDC the payer
   chooses the chain, the merchant does not, while a USDT request is pinned
   to a chain serving USDT at creation. A deposit sent to an address on another
-  supported chain is refused by the contract and returned by hand
+  supported chain is refused by the contract and recovered into custody by
+  hand, then returned to the payer after review
   (`docs/runbooks/wrong-network-deposit.md`).
 - A finalized cursor hash mismatch requires operator intervention; there is no
   automatic finalized-reorg rollback.

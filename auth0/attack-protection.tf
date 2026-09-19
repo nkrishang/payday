@@ -1,6 +1,6 @@
 # Pin Auth0's documented defaults so a dashboard edit cannot silently alter the
 # tenant's launch security posture. Empty allowlists are intentional.
-resource "auth0_attack_protection" "payday" {
+resource "auth0_attack_protection" "gum" {
   brute_force_protection {
     allowlist    = []
     enabled      = true

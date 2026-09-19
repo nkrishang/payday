@@ -31,14 +31,14 @@ curl -fsS "$GUM_API_URL/v1/deposit-requests" \
   -H "Idempotency-Key: smoke-$(date +%s)" \
   -d '{"amount":"0.01","payout_address":"<PAYOUT_ADDRESS>",
        "issuer":{"name":"Gum"},"payer":{"name":"Smoke test"},
-       "payer_policy":{"mode":"permissionless"},"expires_in":3600}' | jq
+       "verification":{"wallet_attestation":true},"expires_in":3600}' | jq
 ```
 
 Copy `id` and `deposit_url` from the JSON output; `currency` is `USDC`
-(the default) and `address` is null until the payer's wallet is bound. Open `deposit_url` in a browser, connect the wallet
+(the default) and `address` is null until the payer's wallet is attested. Open `deposit_url` in a browser, connect the wallet
 you will pay from, and sign the attestation it offers. Then re-read the
 deposit and confirm `address` is set, `payer_wallet` is your wallet, and
-`recovery_address` equals it:
+`recovery_address` is Gum's recovery custody address:
 
 ```bash
 curl -s "$GUM_API_URL/v1/deposit-requests/<ID>" -H "Authorization: Bearer $GUM_API_KEY" | jq
@@ -97,11 +97,12 @@ cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
   --rpc-url "$MONAD_RPC_URL"
 ```
 
-## Step 5: Verify late funds come back to the payer's wallet
+## Step 5: Verify late funds are recovered into custody
 
 Send a second, small transfer to the same deposit address from the wallet you
-signed with. It must come back to that wallet within a minute while the
-status stays `settled`, and the `recovered_funds` ledger must record it:
+signed with. It must be recovered into Gum's recovery custody within a
+minute while the status stays `settled`, and the `recovered_funds` ledger
+must record it:
 
 ```bash
 cast send 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
@@ -110,7 +111,7 @@ cast send 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
   --rpc-url "$MONAD_RPC_URL"
 
 cast call 0x754704Bc059F8C67012fEd69BC8A327a5aafb603 \
-  'balanceOf(address)(uint256)' <YOUR_WALLET> \
+  'balanceOf(address)(uint256)' <RECOVERY_CUSTODY_ADDRESS> \
   --rpc-url "$MONAD_RPC_URL"
 ```
 
@@ -122,8 +123,9 @@ WHERE invoice_id = '<DEPOSIT_REQUEST_UUID>';
 ```
 
 Expect one row with reason `late_transfer` and amount `1000`, and a
-`deposit_request.recovered_funds` delivery on any registered webhook. Return the
-recovered amount by hand afterwards; nothing automates it.
+`deposit_request.recovered_funds` delivery on any registered webhook. Returning the
+recovered amount to the payer is the manual review procedure in the
+production runbook ("Recovery custody and manual returns"); nothing automates it.
 
 ## Expected results
 
@@ -133,7 +135,7 @@ recovered amount by hand afterwards; nothing automates it.
 | Deposit address USDC balance | `0` |
 | Deposit address code | Non-empty (contract deployed) |
 | Payout address USDC balance | Increased by exactly the requested amount |
-| Recovery wallet USDC balance | Increased by the late transfer, with a matching `recovered_funds` row |
+| Recovery custody USDC balance | Increased by the late transfer, with a matching `recovered_funds` row |
 
 ## Understanding the sweep transaction
 

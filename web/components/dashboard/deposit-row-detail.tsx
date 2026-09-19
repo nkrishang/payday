@@ -32,7 +32,7 @@ import { LoadProblem } from "./load-problem";
 import { useMerchant, useResource } from "./session";
 import { StatusBadge } from "./status-badge";
 import { VerificationActivity } from "./verification-activity";
-import { VerificationStatus } from "./verification-status";
+import { identityGated, VerificationStatus } from "./verification-status";
 
 /**
  * One deposit request in full, inside its own row.
@@ -85,7 +85,7 @@ function Loaded({ payment }: { payment: DepositRequest }) {
   const percent = receivedPercent(payment.received_base_units, payment.amount_base_units);
   const settled = payment.status === "settled";
   const failed = payment.status === "expired" || payment.status === "returned";
-  const gated = payment.payer_policy.mode !== "permissionless";
+  const gated = identityGated(payment.verification);
   const live = !settled && !failed;
   // A live request past its deadline is waiting on the sweep, not on a payer.
   const overdue = new Date(payment.expires_at).getTime() < now;
@@ -193,7 +193,7 @@ function Loaded({ payment }: { payment: DepositRequest }) {
       {gated ? (
         <Panel label="Verification">
           <VerificationStatus
-            policy={payment.payer_policy}
+            verification={payment.verification}
             completedAt={payment.verification_completed_at}
             unsolicitedAt={payment.likely_unsolicited_at}
           />
@@ -216,7 +216,9 @@ function Loaded({ payment }: { payment: DepositRequest }) {
               />
             ) : (
               <span className="text-muted">
-                Created once the payer signs from the wallet they will pay from
+                {payment.verification.wallet_attestation
+                  ? "Created once the payer signs from the wallet they will pay from"
+                  : "Created once the payer chooses a network"}
               </span>
             )}
           </Fact>

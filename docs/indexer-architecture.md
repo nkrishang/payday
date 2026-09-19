@@ -147,8 +147,9 @@ Credit an observation only when:
    request's currency. A transfer of another served stablecoin to a watched
    address is seen (the filter carries every configured contract) but never
    credited: it stays at the address and the permissionless
-   `recover(token)` on the deployed Payment returns it to the payer's
-   wallet.
+   `recover(token)` on the deployed Payment forwards it to the deposit
+   address's recovery term, Gum's recovery custody, from which Gum
+   returns it to the payer after review.
 3. `topic0` equals `keccak256("Transfer(address,address,uint256)")`.
 4. The recipient is a known deposit address for that chain and token.
 5. The value is valid `uint256` data.
@@ -161,10 +162,12 @@ Any genuine nonzero inbound transfer of the request's token to a `created` or
 credited because the resulting balance is spendable by the deposit contract. A zero-value transfer is retained
 with an `error` disposition. A transfer to a deposit request in any other status is
 retained with a `late` disposition: it never counts toward the amount, but it
-sits at the address and is queued for return to the payer through
-`Deposit.recover`. A nonzero transfer from any wallet but the deposit request's
+sits at the address and is queued for recovery into Gum's custody through
+`Deposit.recover`. On a wallet-attested request, a nonzero transfer from any
+wallet but the deposit request's
 attested payer wallet is credited too, but flags the deposit request
-`likely_unsolicited_at` once, at its chain time. The exception is a payment
+`likely_unsolicited_at` once, at its chain time; without wallet attestation
+no sender is ever flagged. The exception is a payment
 from another network through Relay: the API records each quote as a
 `relay_intents` row, and once the payer has reported the quote's deposit as
 sent, a transfer for exactly the quoted amount from an unknown sender is
@@ -173,7 +176,9 @@ quote whose origin chain this deployment serves is followed: attribution
 reads the chain, so an intent from an unserved chain is deferred and never
 attributes. For a `sent` intent the destination chain's worker polls Relay,
 and on `success` it verifies the origin transaction on the origin chain —
-a succeeded receipt whose sender is the attested wallet and whose
+a succeeded receipt whose sender is the wallet that requested the quote
+(the request carries no attested wallet, since Relay is offered only on
+requests without wallet attestation) and whose
 `Transfer` log of the quoted origin token debited that wallet by exactly
 the quoted amount. The
 verified hash is kept on the intent (`verified_origin_tx_hash`, unique per
@@ -500,13 +505,16 @@ the cumulative amount reaches the requested amount.
 
 Before expiration, the deposit request constructor requires a balance of at least the
 requested amount, transfers exactly that amount to the beneficiary, and sends any
-remainder back to the payer's attested wallet, so an overpayment present
+remainder to the deposit address's recovery term, Gum's dedicated KMS
+recovery wallet, so an overpayment present
 before execution is neither stranded nor forwarded to the merchant. After
-expiration, execution instead transfers the complete balance to that wallet
-without requiring the requested amount. Both the expiration timestamp and the
-recovery wallet are committed into the deterministic address; the wallet is
-the one the payer attested when the address was derived, not a merchant or
-platform choice. A deposit request without a bound wallet has no address and nothing
+expiration, execution instead transfers the complete balance to that same
+recovery wallet without requiring the requested amount. Both the expiration
+timestamp and the recovery wallet are committed into the deterministic
+address; the recovery wallet is Gum's configured recovery custody
+(`GUM_RECOVERY_ADDRESS`), never a payer-chosen value, and Gum returns
+recovered funds to the payer manually after review. A deposit request whose
+network is not yet fixed has no address and nothing
 to sweep.
 
 Factory execution is permissionless, so anyone can recover an expired partial
@@ -514,12 +522,13 @@ deposit; Gum also does it automatically once the deposit request is `expired`,
 reporting the outcome as `recovered`.
 
 Transfers sent after the Deposit contract has executed are forwarded to the
-payer's wallet by `Deposit.recover`, which anyone may call and which the
-sweep path collects automatically; they are never credited to the deposit request. The
+recovery custody by `Deposit.recover`, which anyone may call and which the
+sweep path collects automatically; they are never credited to the deposit
+request. The
 API still describes the address as single-use so merchants do not present it
 after settlement.
 
-Every nonzero amount the payer's wallet receives back — an overpayment remainder,
+Every nonzero amount the recovery custody receives — an overpayment remainder,
 an expired balance, or a late transfer — is a `recovered_funds` row keyed by
 deposit request, transaction, and reason, inserted in the transaction that finalizes
 the batch, so a replayed receipt cannot double-count and the ledger is never
@@ -556,7 +565,7 @@ Per item the receipt carries one of:
   same receipt; the parser combines the two regardless of event order and
   rejects a duplicate or conflicting pair as a malformed receipt;
 - `Recovered` alone from the deposit address: the deployment paid the whole
-  balance back to the payer's wallet after expiry (`Returned`, →
+  balance to the recovery custody after expiry (`Returned`, →
   `recovered`);
 - `SweepRecovered` from the helper: the contract pre-existed and `recover`
   forwarded the reported amount (`LateCollected`); an open deposit request

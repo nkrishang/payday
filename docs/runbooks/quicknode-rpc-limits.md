@@ -66,7 +66,7 @@ that carries stablecoin transfers costs nothing extra when the log carries
 If credits climb well above that, check in this order:
 
 1. `transfer signal disconnected` / `connection failed` warnings (the
-   `payday-indexer-signal-down` alarm; every log line names its
+   `gum-indexer-signal-down` alarm; every log line names its
    `chain_id`). While the socket is down on an active chain the reconciler
    runs every `indexer_poll_interval_ms` (5 s), which is the old cost
    profile: about 3.9M credits a day on Monad. Confirm that chain's `wss://`
@@ -76,7 +76,7 @@ If credits climb well above that, check in this order:
 2. `indexer cursor lagging`: a backlog is draining at
    `range × GUM_INDEXER_MAX_RANGES_PER_TICK` blocks per pass, three calls
    per range. This is bounded work that ends when the cursor catches up.
-3. `429` / `-32007` errors counted by `payday-indexer-pass-failing`:
+3. `429` / `-32007` errors counted by `gum-indexer-pass-failing`:
    the pacing below should make these rare at this call volume; a sustained
    run means something else shares the endpoint's requests-per-second budget.
 
@@ -124,7 +124,7 @@ restart — see [service-restart.md](service-restart.md).
 
 ```bash
 # Check indexer logs — rejections should stop
-aws logs tail /ecs/payday/indexer --since 5m --region "$AWS_REGION" \
+aws logs tail /ecs/gum/indexer --since 5m --region "$AWS_REGION" \
   | grep -E "413|rejected|splitting|lagging"
 
 # Test the RPC directly with a 100-block range (Monad's USDC; any configured token works)

@@ -10,14 +10,15 @@ use axum::Extension;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use chrono::Utc;
 use uuid::Uuid;
 
 use gum_core::{
     Amount, AsOfDto, BeneficiaryAddress, CanonicalIssuanceSnapshot, ChainId, CreateDepositRequest,
     Currency, CustomerId, DepositRequestListResponse, DepositRequestResponse, DepositRequestStatus,
-    DepositRequestSummaryResponse, IndexerFreshnessDto, Invoice, PDF_MIME_TYPE, Party, PayerPolicy,
-    PayerPolicyMode, SnapshotNetwork, TransferDto, TransferListResponse, TransferRelayDto,
-    parse_expiration, rfc3339, validate_expiration_window,
+    DepositRequestSummaryResponse, IndexerFreshnessDto, Invoice, PDF_MIME_TYPE, Party,
+    PayerVerification, RecoveryAddress, SnapshotNetwork, TransferDto, TransferListResponse,
+    TransferRelayDto, parse_expiration, rfc3339, validate_expiration_window,
 };
 use serde::Deserialize;
 
@@ -237,8 +238,8 @@ pub async fn create_deposit_request(
         validate_issuer_id(issuer_id)?;
     }
     validate_document(&issuer, &payer, &req)?;
-    let payer_policy = req.payer_policy.normalized();
-    payer_policy
+    let verification = req.verification.normalized();
+    verification
         .validate()
         .map_err(|error| ApiError::invalid_request(error.to_string()))?;
     let beneficiary_addr = Address::from_str(&payout_address)
@@ -345,7 +346,7 @@ pub async fn create_deposit_request(
         metadata: &req.metadata,
         customer_id: req.customer_id.map(Uuid::from),
         issuer_id: req.issuer_id.clone(),
-        payer_policy: &payer_policy,
+        payer_verification: &verification,
         attachment_id: req.attachment_id.map(Uuid::from),
         attachment: attachment_commitment.as_ref(),
     };
@@ -397,16 +398,22 @@ pub async fn create_deposit_request(
         }
     }
 
-    // 7. Commit to the document. The address is derived later, when the
-    // payer binds the wallet they will pay from on the network they chose.
+    // 7. Commit to the document. The recovery term is Gum's own recovery
+    // wallet — the deployment's `GUM_RECOVERY_ADDRESS` — whatever add-ons
+    // the request attaches; recovery is Gum's manual process, never the
+    // payer's. The address is derived now for a request whose network is
+    // already known (pinned, without wallet attestation), and later when the
+    // payer attests a wallet or picks a network.
     let beneficiary = BeneficiaryAddress(beneficiary_addr);
+    let recovery = RecoveryAddress(state.recovery_address);
     let mut snapshot = CanonicalIssuanceSnapshot::new(
         issuer.clone(),
         payer.clone(),
-        payer_policy.clone(),
+        verification.clone(),
         currency,
         &networks,
         beneficiary,
+        recovery,
         amount,
         expiration_timestamp,
     );
@@ -418,6 +425,7 @@ pub async fn create_deposit_request(
         currency,
         &networks,
         beneficiary,
+        recovery,
         amount,
         expiration_timestamp,
         snapshot,
@@ -441,7 +449,18 @@ pub async fn create_deposit_request(
     input.customer_id = req.customer_id.map(Uuid::from);
     input.issuer_id = req.issuer_id.clone();
     input.metadata = req.metadata.clone();
-    input.payer_notification_email = payer_notification_email(&payer, &payer_policy);
+    input.payer_notification_email = payer_notification_email(&payer, &verification);
+    // A request without the wallet-attestation add-on whose network the
+    // merchant pinned is payable the moment it exists: one network offered
+    // means the payer's choice is already made, so register the address now.
+    // Multi-network requests wait for the payer's choice; wallet-attested
+    // ones for the attestation that names the wallet the salt commits to.
+    if !invoice.wallet_attestation_required() && invoice.networks.len() == 1 {
+        let binding = invoice
+            .bind_network(invoice.networks[0].chain_id, rfc3339(Utc::now()))
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        input.initial_binding = Some(binding);
+    }
 
     let issued = match state
         .repo
@@ -507,7 +526,7 @@ pub async fn create_deposit_request(
     // so the first response carries one. A replay does not: the secret exists
     // only in the response that minted it, and a merchant that lost it mints
     // another through the client-secret route.
-    if payer_policy.mode() == PayerPolicyMode::MerchantSession {
+    if verification.merchant_auth.is_some() {
         let minted = state
             .payer_sessions
             .create_client_secret(invoice_id, account.0, CLIENT_SECRET_TTL)
@@ -724,7 +743,7 @@ pub async fn list_deposit_requests(
                 status: response.status,
                 amount: response.amount,
                 received: response.received,
-                payer_policy_mode: response.payer_policy.mode(),
+                verification: response.verification,
                 customer_id: row.customer_id.map(|id| CustomerId(id).to_string()),
                 issuer_id: row.issuer_id.clone(),
                 has_attachment,
@@ -827,11 +846,11 @@ fn unix_now() -> u64 {
 /// address, nonce, the resolved deadline of a relative expiry) is not part of
 /// the request and is not compared.
 /// Whom to email the request to, if anyone: the payer the merchant named,
-/// provided the link in that email would open for them. A merchant-session
+/// provided the link in that email would open for them. A merchant-auth
 /// request opens only from inside the merchant's own app.
-fn payer_notification_email(payer: &Party, policy: &PayerPolicy) -> Option<String> {
+fn payer_notification_email(payer: &Party, verification: &PayerVerification) -> Option<String> {
     let email = payer.email.as_deref()?.trim();
-    if email.is_empty() || policy.mode() == PayerPolicyMode::MerchantSession {
+    if email.is_empty() || verification.merchant_auth.is_some() {
         return None;
     }
     Some(email.to_owned())
@@ -1005,8 +1024,7 @@ mod tests {
             "payout_address": "0x0000000000000000000000000000000000000002",
             "amount": "1",
             "issuer": {"name": "Acme"},
-            "payer": {"name": "Globex"},
-            "payer_policy": {"mode": "permissionless"}
+            "payer": {"name": "Globex"}
         });
         for (key, value) in overrides.as_object().unwrap() {
             json[key] = value.clone();
@@ -1026,16 +1044,14 @@ mod tests {
         let missing = serde_json::from_value::<CreateDepositRequest>(serde_json::json!({
             "amount": "1",
             "issuer_id": "merchant-acme",
-            "customer_id": "cus_0198f80c-2222-7dc1-a369-90556a64f700",
-            "payer_policy": {"mode": "permissionless"}
+            "customer_id": "cus_0198f80c-2222-7dc1-a369-90556a64f700"
         }))
         .unwrap_err();
         assert!(missing.to_string().contains("payout_address"), "{missing}");
         let missing = serde_json::from_value::<CreateDepositRequest>(serde_json::json!({
             "payout_address": "0x0000000000000000000000000000000000000002",
             "amount": "1",
-            "customer_id": "cus_0198f80c-2222-7dc1-a369-90556a64f700",
-            "payer_policy": {"mode": "permissionless"}
+            "customer_id": "cus_0198f80c-2222-7dc1-a369-90556a64f700"
         }))
         .unwrap_err();
         assert!(missing.to_string().contains("issuer"), "{missing}");
@@ -1045,8 +1061,7 @@ mod tests {
             "amount": "1",
             "issuer": {"name": "Acme"},
             "payer": {"name": "Globex"},
-            "issuer_id": "merchant-acme/invoice#42 (FY26)",
-            "payer_policy": {"mode": "permissionless"}
+            "issuer_id": "merchant-acme/invoice#42 (FY26)"
         }))
         .unwrap();
         assert_eq!(
@@ -1073,13 +1088,13 @@ mod tests {
     fn create_wire_shape_defaults_metadata_and_takes_the_document() {
         let request = request(serde_json::json!({
             "expires_in": 3600, "reference": "order-42", "heading": "March retainer",
-            "payer_policy": {"mode": "verified_email", "expected_email": "Alice@Example.com"}
+            "verification": {"email": {"expected_email": "Alice@Example.com"}}
         }));
         assert_eq!(request.reference.as_deref(), Some("order-42"));
         assert_eq!(request.heading.as_deref(), Some("March retainer"));
         assert_eq!(request.metadata, serde_json::json!({}));
         assert_eq!(
-            request.payer_policy.normalized().expected_email(),
+            request.verification.normalized().expected_email(),
             Some("alice@example.com")
         );
         validate_inline(&request).unwrap();
@@ -1087,17 +1102,16 @@ mod tests {
 
     #[test]
     fn payer_email_is_queued_only_where_the_link_would_open() {
-        let policy = |json: serde_json::Value| {
-            serde_json::from_value::<PayerPolicy>(json)
+        let verification = |json: serde_json::Value| {
+            serde_json::from_value::<PayerVerification>(json)
                 .unwrap()
                 .normalized()
         };
-        let open = policy(serde_json::json!({"mode": "permissionless"}));
-        let gated = policy(
-            serde_json::json!({"mode": "verified_email", "expected_email": "alice@example.com"}),
-        );
+        let open = verification(serde_json::json!({}));
+        let gated =
+            verification(serde_json::json!({"email": {"expected_email": "alice@example.com"}}));
         let embedded =
-            policy(serde_json::json!({"mode": "merchant_session", "payer_reference": "user-1"}));
+            verification(serde_json::json!({"merchant_auth": {"payer_reference": "user-1"}}));
         let payer = |email: Option<&str>| Party {
             name: "Globex".into(),
             email: email.map(str::to_owned),
