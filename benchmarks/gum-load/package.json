@@ -1,0 +1,27 @@
+{
+  "name": "@gum/load",
+  "version": "0.1.0",
+  "description": "Gum load-test and benchmark harness: an independent external API user that measures settlement latency and capacity, with a live terminal view.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "gum-load": "./dist/cli.js"
+  },
+  "scripts": {
+    "prebuild": "node ../../scripts/ensure-sdk-dist.mjs",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run -s build && node --test dist/test/*.test.js",
+    "gum-load": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@gum/sdk": "file:../../sdk/typescript",
+    "viem": "2.56.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "@types/node": "^22.10.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

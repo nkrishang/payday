@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "mode": "local",
+  "api": { "url": "http://127.0.0.1:3000" },
+  "currency": "USDC",
+  "amount": "0.01",
+  "payout": { "mode": "payer_wallet" },
+  "wallets": { "count": 8, "seedEnvVar": "GUM_LOAD_PAYER_SEED" },
+  "webhook": { "enabled": false, "listenPort": 8819 },
+  "observation": { "pollMs": 500, "apiPollMs": 1000, "logRangeBlocks": 500 },
+  "checkoutOrigin": "http://127.0.0.1:3002",
+  "limits": {
+    "maxAmount": "1000",
+    "maxGrossVolume": "100000",
+    "maxOutstandingPrincipal": "10000",
+    "maxConcurrentFunded": 256,
+    "maxRequests": 100000,
+    "maxNativeSpend": "10",
+    "maxOldestUnsettledSeconds": 600,
+    "perOpTimeoutSeconds": 300,
+    "reserveFraction": 0.25
+  }
+}

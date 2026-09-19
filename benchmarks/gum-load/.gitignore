@@ -1,0 +1,6 @@
+dist/
+runs/
+node_modules/
+config/*.local.json
+config/staging.json
+config/production.json
