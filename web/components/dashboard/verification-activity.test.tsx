@@ -33,7 +33,13 @@ function renderActivity(detail: VerificationDetail) {
   const client = { depositRequests: { verification } } as unknown as GumClient;
   render(
     <MerchantProvider
-      value={{ client, accessToken: "eyJ.dash.token", email: "merchant@example.com", signOut: vi.fn() }}
+      value={{
+        client,
+        accessToken: "eyJ.dash.token",
+        email: "merchant@example.com",
+        subject: "did:privy:stub-merchant",
+        signOut: vi.fn(),
+      }}
     >
       <VerificationActivity paymentId="dr_1" />
     </MerchantProvider>,

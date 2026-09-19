@@ -50,11 +50,8 @@ export interface CreateDepositRequest {
    * payer may still pay it from another network through Relay.
    */
   currency?: string;
-  /**
-   * Where exactly `amount` settles. May be left out when `issuer_id` names an
-   * identity with a saved payout address: its first one is used.
-   */
-  payout_address?: string;
+  /** Where exactly `amount` settles: an address you control. Required. */
+  payout_address: string;
   /**
    * Pin the network the payer must pay on: one of the deployment's chain ids
    * as a decimal string (`"143"`). Left out, the payer chooses among every
@@ -62,12 +59,8 @@ export interface CreateDepositRequest {
    * Gum does not serve the currency on is refused with `422 unsupported_chain`.
    */
   chain_id?: string;
-  /**
-   * The issuing party as the document will carry it. May be left out when
-   * `issuer_id` is given: the identity's name, contact address, and details
-   * are snapshotted in its place. An inline party always wins.
-   */
-  issuer?: Party;
+  /** The issuing party as the document will carry it. Required. */
+  issuer: Party;
   /**
    * The paying party. May be left out when `customer_id` is given: the saved
    * customer is snapshotted in its place. An inline party always wins.
@@ -76,10 +69,9 @@ export interface CreateDepositRequest {
   payer_policy: PayerPolicy;
   customer_id?: string;
   /**
-   * The saved issuer identity this is issued under. `issuer` above is still
-   * the snapshot the document carries and what the address commits to; this
-   * only records which identity it came from, and keeps pointing at it after
-   * that identity is renamed or moved to another mailbox.
+   * An opaque identifier for the issuer, yours to define: a value you pass is
+   * stored verbatim, returned on every read, and filterable on the list
+   * endpoint. 1–255 bytes; the API never interprets it.
    */
   issuer_id?: string;
   notes?: string;
@@ -146,7 +138,7 @@ export interface DepositRequest {
   heading: string | null;
   reference: string | null;
   customer_id: string | null;
-  /** The issuer identity it was issued under; immutable once issued. */
+  /** The issuer's opaque identifier, if the request carried one; immutable once issued. */
   issuer_id: string | null;
   metadata: Record<string, JsonValue>;
   /** Full policy including assertions; merchant-only, never on the payer route. */
@@ -487,7 +479,7 @@ export interface ListDepositRequestsParams {
   reference?: string;
   /** Only requests billed to this customer. */
   customer_id?: string;
-  /** Only requests issued under this identity. */
+  /** Only requests whose issuer identifier matches this string exactly. */
   issuer_id?: string;
   verification?: VerificationFilter;
   limit?: number;
@@ -507,58 +499,6 @@ export interface TransferRelay {
   origin_transaction_hash: string | null;
 }
 export interface TransferList { transfers: Transfer[] }
-/** Internal: the dashboard onboarding walkthrough's one real demo transfer. */
-export interface OnboardingDepositResponse { payer_session: string; tx_hash: string }
-
-/** A saved payout wallet, EIP-55 checksummed and unique per account. */
-export interface PayoutAddress {
-  id: string;
-  address: string;
-  label: string | null;
-  created_at: string;
-}
-
-/**
- * A saved issuer identity: the party a deposit request is issued under, its contact
- * mailbox, and the wallets it may settle to. Issuance is unchanged — a deposit
- * request still carries its own `issuer` and `payout_address` snapshot — so
- * editing an identity never touches a request already issued.
- */
-export interface Issuer {
-  id: string;
-  name: string;
-  contact_email: string;
-  details: string | null;
-  /** Whether the contact mailbox was proven with an emailed code. */
-  email_verified: boolean;
-  email_verified_at: string | null;
-  /** In association order; the first is the sensible default. */
-  payout_addresses: PayoutAddress[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CreateIssuer {
-  name: string;
-  contact_email: string;
-  details?: string;
-}
-/**
- * A partial update: a field left out keeps its value; `details: null` clears
- * it. A changed `contact_email` clears the verification, so a rename alone
- * never touches a proven mailbox.
- */
-export interface UpdateIssuer { name?: string; contact_email?: string; details?: string | null }
-export interface ListIssuersParams { starting_after?: string; limit?: number }
-export interface IssuerPage { issuers: Issuer[]; next_cursor: string | null }
-/** Where the code went, and when another may be asked for. */
-export interface StartIssuerEmailVerification {
-  contact_email: string;
-  resend_available_at: string;
-}
-export interface CreatePayoutAddress { address: string; label?: string }
-export interface PayoutAddressList { payout_addresses: PayoutAddress[] }
-
 export interface Customer {
   id: string;
   name: string;
@@ -1098,14 +1038,6 @@ export class GumClient {
      */
     cancel: (id: string): Promise<DepositRequest> =>
       this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
-    /**
-     * Internal: the dashboard onboarding walkthrough's one real demo
-     * transfer and verification. Refuses `409 onboarding_deposit_not_eligible`
-     * for anything not addressed to Gum's own onboarding mailbox — not a
-     * general merchant feature.
-     */
-    onboardingDeposit: (id: string): Promise<OnboardingDepositResponse> =>
-      this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/onboarding-deposit`, { method: "POST" }),
     /** Finalized transfer provenance for the deposit request. */
     transfers: (id: string): Promise<TransferList> =>
       this.request(`/v1/deposit-requests/${encodeURIComponent(id)}/transfers`),
@@ -1155,55 +1087,6 @@ export class GumClient {
       this.request(`/v1/customers${query(params)}`),
     update: (id: string, customer: UpdateCustomer): Promise<Customer> =>
       this.request(`/v1/customers/${encodeURIComponent(id)}`, { method: "PATCH", body: customer }),
-  };
-
-  /**
-   * Saved issuer identities. An identity is a convenience for whoever issues:
-   * `depositRequests.create` still takes the party and the payout address inline and
-   * snapshots them, so nothing here can change a deposit request already issued. The
-   * contact mailbox is the exception worth proving — payers are told to write
-   * to it — and it is proven with the same emailed code the dashboard signs in
-   * with.
-   */
-  readonly issuers = {
-    create: (issuer: CreateIssuer): Promise<Issuer> =>
-      this.request("/v1/issuers", { method: "POST", body: issuer }),
-    get: (id: string): Promise<Issuer> =>
-      this.request(`/v1/issuers/${encodeURIComponent(id)}`),
-    list: (params: ListIssuersParams = {}): Promise<IssuerPage> =>
-      this.request(`/v1/issuers${query(params)}`),
-    /** Partial: only the fields given change; a different `contact_email` clears the verification. */
-    update: (id: string, issuer: UpdateIssuer): Promise<Issuer> =>
-      this.request(`/v1/issuers/${encodeURIComponent(id)}`, { method: "PATCH", body: issuer }),
-    remove: (id: string): Promise<void> =>
-      this.request(`/v1/issuers/${encodeURIComponent(id)}`, { method: "DELETE" }),
-    /**
-     * Emails a code to the identity's stored contact address — the request
-     * never names a mailbox. One code per identity per minute
-     * (`otp_resend_cooldown`).
-     */
-    startEmailVerification: (id: string): Promise<StartIssuerEmailVerification> =>
-      this.request(`/v1/issuers/${encodeURIComponent(id)}/verify/email/start`, { method: "POST" }),
-    confirmEmailVerification: (id: string, otp: string): Promise<Issuer> =>
-      this.request(`/v1/issuers/${encodeURIComponent(id)}/verify/email/confirm`, {
-        method: "POST",
-        body: { otp },
-      }),
-    /** Replaces the whole set of addresses this identity may settle to. */
-    setPayoutAddresses: (id: string, payoutAddressIds: string[]): Promise<Issuer> =>
-      this.request(`/v1/issuers/${encodeURIComponent(id)}/payout-addresses`, {
-        method: "PUT",
-        body: { payout_address_ids: payoutAddressIds },
-      }),
-  };
-
-  readonly payoutAddresses = {
-    /** Saving a wallet you already saved returns the row you have. */
-    create: (input: CreatePayoutAddress): Promise<PayoutAddress> =>
-      this.request("/v1/payout-addresses", { method: "POST", body: input }),
-    list: (): Promise<PayoutAddressList> => this.request("/v1/payout-addresses"),
-    remove: (id: string): Promise<void> =>
-      this.request(`/v1/payout-addresses/${encodeURIComponent(id)}`, { method: "DELETE" }),
   };
 
   readonly attachments = {

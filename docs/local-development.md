@@ -170,7 +170,7 @@ For the dashboard, `web/.env.local` also needs `NEXT_PUBLIC_PRIVY_APP_ID`
 `GUM_PRIVY_APP_ID`; `http://127.0.0.1:3002` must be among that app's
 allowed domains) and `NEXT_PUBLIC_ATTACHMENT_UPLOAD_ORIGIN` (the local MinIO,
 `http://127.0.0.1:9000`, so the page may PUT PDFs there). The example file
-carries working local values. Payer and issuer-mailbox codes still come from
+carries working local values. Payer codes still come from
 the development identity provider, printed in its log.
 
 ## Local Anvil end-to-end run
@@ -487,8 +487,6 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
 - `GUM_RPC_WS_URL_<chain_id>` — WebSocket endpoint for that chain's
   transfer signal; unset derives it from the HTTP URL (`https` → `wss`,
   `http` → `ws`, same host, path and token), `off` disables the signal
-- `GUM_ONBOARDING_CHAIN_ID` — the chain the dashboard onboarding demo
-  deposit binds and pays on; defaults to the first registry entry
 - `GUM_PUBLIC_BASE_URL` — origin serving the hosted checkout, which is where
   deposit links point; `http://127.0.0.1:3002`
   locally, `https://gum.money` in production. Must be a bare origin, and HTTPS
@@ -564,11 +562,6 @@ CREATE3 address parity; and `BatchSweeper` under the production gas budget.
   `0x976EA74026E726554dB657fA54763abd0C3a0aa9` is the local trusted attestor);
   mutually exclusive with `GUM_ATTESTATION_KMS_KEY_ID`, the production KMS
   secp256k1 key ARN. Exactly one is required
-- `GUM_ONBOARDING_PAYER_KEY` — local key that pays the dashboard onboarding
-  walkthrough's one self-issued deposit request (Anvil account #1); mutually
-  exclusive with `GUM_ONBOARDING_PAYER_KMS_KEY_ID`, the production KMS
-  key. Unlike attestation, both may be unset in any environment, including
-  production — that simply disables `POST /v1/deposit-requests/{id}/onboarding-deposit`
 
 The AWS deployment procedure is in `docs/production-runbook.md`; its
 Terraform source is under `infra/`.

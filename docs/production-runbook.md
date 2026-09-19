@@ -30,7 +30,7 @@ address's recovery term. Gum custodies no stablecoin.
 | Transaction executor (`gum-signers`) | ECS Fargate service `signers`, one task; the only principal that can `kms:Sign` with the sweep pool; consumes execution commands from the Postgres bus and publishes execution events; no inbound access | none | `crates/gum-signers` |
 | Database (domain tables, `bus.*`, `execution.*`) | RDS PostgreSQL, private subnets, TLS to the pinned RDS CA; reachable from `api` and `signers` only | none | `crates/gum-schema/migrations` |
 | Schema migrations | ECS task definition `migrate` (the `api` image running `gum-server migrate`), run once per deploy by `scripts/run-migrate-task.sh` before the services roll | none | `crates/gum-schema` |
-| Deposit request attachments (PDF) | S3 bucket `payday-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
+| Deposit request attachments (PDF) | S3 bucket `gum-invoice-attachments` scanned by GuardDuty Malware Protection | virtual-hosted bucket URL, browser PUT only | `infra/` |
 | Signing keys | KMS secp256k1 keys: sweep signer, attestation signer; a symmetric key for attachments; a legacy recovery key pending removal | none | `infra/` |
 | Merchant notification email | SES identity for `gum.money` | `alerts@gum.money` | `infra/` |
 | Payer deposit request email | Resend, with the API's own key (`resend_api_key`) | `contact@gum.money` | `infra/` |
@@ -425,8 +425,7 @@ Replace every placeholder in `terraform.tfvars`, including:
   and `batch_sweeper`, their `factory_code_hash` and
   `batch_sweeper_code_hash` from §2, that chain's `start_block`, its
   `tokens` (`[{currency = "USDC", address = …}, {currency = "USDT",
-  address = …}]`; at least one chain must list USDC, which the onboarding
-  demo pays), and the fixed values from the table above. Both tasks receive
+  address = …}]`), and the fixed values from the table above. Both tasks receive
   the list as `GUM_CHAINS`, whose entries carry
   `tokens: [{"currency":"USDC","address":"0x…"},{"currency":"USDT","address":"0x…"}]`
   and `start_block`. Each `tokens` address must be the issuer's **canonical
@@ -565,7 +564,7 @@ chain. At boot it logs one `configured signer` line per key and chain with
 the Ethereum address derived from the KMS public key:
 
 ```bash
-aws logs tail /ecs/payday/signers --since 15m \
+aws logs tail /ecs/gum/signers --since 15m \
   --filter-pattern 'configured signer'
 ```
 
@@ -613,16 +612,6 @@ whatever runs `gum_core::verify_proof`; an attestation signed by anything
 else must fail verification. The address changes only if the key is
 replaced, which changes the trust anchor of every earlier proof, so treat
 replacement as an announced cut-over, never as routine rotation.
-
-### Onboarding demo payer (optional)
-
-The dashboard's onboarding walkthrough can pay one self-issued deposit
-request per account from a Gum-funded wallet. Terraform does not
-provision that key; the endpoint is disabled unless `gum-server` is given
-`GUM_ONBOARDING_PAYER_KMS_KEY_ID` (a KMS key the API task role may sign
-with, funded with a little gas and USDC on the onboarding chain:
-`GUM_ONBOARDING_CHAIN_ID`, the first `chains` entry by default). Leave
-it off for launch unless the walkthrough is wanted.
 
 ## 9. Deploy the web app to Vercel
 
@@ -716,7 +705,7 @@ resolving; confirm in **SES → Identities**. Then move the SES account out of
 the sandbox in this region and confirm a test message from
 `alerts@gum.money` reaches an external mailbox. Deposit creation refuses to create additional unnotifiable
 deposits for an account without a verified email, and
-`payday-notification-missing-contact` alarms if a deposit request snapshots
+`gum-notification-missing-contact` alarms if a deposit request snapshots
 no contact.
 
 ### Sign in and test the API

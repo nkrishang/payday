@@ -35,6 +35,8 @@ export interface Merchant {
   accessToken: string;
   /** The mailbox the merchant signed in with, as Privy reports it. */
   email: string | null;
+  /** The stable Privy identity id: what the resource cache is owned by. */
+  subject: string;
   signOut: () => void;
 }
 
@@ -43,7 +45,7 @@ const ResourceCacheContext = createContext<ResourceCache | null>(null);
 
 /** Supplies a merchant to a subtree; tests use it in place of the gate. */
 export function MerchantProvider({ value, children }: { value: Merchant; children: ReactNode }) {
-  const cache = useResourceCacheFor(value.signOut, value.email);
+  const cache = useResourceCacheFor(value.signOut, value.subject);
   return (
     <MerchantContext.Provider value={value}>
       <ResourceCacheContext.Provider value={cache}>{children}</ResourceCacheContext.Provider>
@@ -129,21 +131,25 @@ export function MerchantGate({
   }, [logout, router]);
 
   const email = user?.email?.address ?? null;
+  const subject = user?.id ?? "";
   const value = useMemo<Merchant | null>(
     () =>
-      authenticated && identityToken
+      authenticated && identityToken && subject
         ? {
             client: createMerchantClient(identityToken),
             accessToken: identityToken,
             email,
+            subject,
             signOut,
           }
         : null,
-    [authenticated, identityToken, email, signOut],
+    [authenticated, identityToken, email, subject, signOut],
   );
-  // Keyed by the mailbox, not the token: Privy rotates the identity token
-  // while the merchant is signed in, and a rotation must not empty the page.
-  const cache = useResourceCacheFor(signOut, email);
+  // Keyed by the identity id, not the token and not the mailbox: Privy
+  // rotates the identity token while the merchant is signed in, and changing
+  // the sign-in email must not empty the page — the same person keeps their
+  // loaded data either way.
+  const cache = useResourceCacheFor(signOut, subject);
 
   if (signingOut) {
     return <SigningOutScreen />;
@@ -241,7 +247,7 @@ class ResourceCache {
 
   constructor(
     private readonly signOut: () => void,
-    /** The mailbox this cache belongs to; a different one gets a new cache. */
+    /** The identity this cache belongs to; a different one gets a new cache. */
     readonly owner: string | null,
   ) {}
 
@@ -372,9 +378,9 @@ class ResourceCache {
   }
 }
 
-/** One cache per signed-in merchant, emptied when the account changes. */
-function useResourceCacheFor(signOut: () => void, email: string | null): ResourceCache {
-  return useMemo(() => new ResourceCache(signOut, email), [signOut, email]);
+/** One cache per signed-in merchant, emptied when the identity changes. */
+function useResourceCacheFor(signOut: () => void, owner: string | null): ResourceCache {
+  return useMemo(() => new ResourceCache(signOut, owner), [signOut, owner]);
 }
 
 function useResourceCache(): ResourceCache {

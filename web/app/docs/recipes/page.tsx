@@ -7,7 +7,7 @@ import { Callout, DocsPage, H2, Step, Steps } from "@/components/docs/prose";
 export const metadata: Metadata = {
   title: "Recipes",
   description:
-    "Complete integration patterns: crediting a signed-in user, invoicing with a PDF, verified-email requests, reconciliation, saved records, and key rotation.",
+    "Complete integration patterns: crediting a signed-in user, invoicing with a PDF, verified-email requests, reconciliation, saved customers, and key rotation.",
 };
 
 const CREDIT_CREATE = `// POST /deposits  — your route, behind your own authentication
@@ -20,7 +20,8 @@ app.post("/deposits", requireUser, async (req, res) => {
   const deposit = await gum.depositRequests.create(
     {
       amount,
-      issuer_id: process.env.GUM_ISSUER_ID!, // saved identity: name, mailbox, payout wallet
+      payout_address: process.env.GUM_PAYOUT_ADDRESS!, // where settled funds land
+      issuer: { name: "Your Exchange" },
       payer: { name: req.user.displayName },
       heading: "Account top-up",
       reference: \`topup-\${req.user.id}-\${Date.now()}\`,
@@ -70,7 +71,8 @@ const pdf = await gum.attachments.upload(await readFile("INV-1042.pdf"), "INV-10
 const request = await gum.depositRequests.create(
   {
     amount: "1250.00",
-    issuer_id: acme.id,
+    payout_address: "0x1111…",       // your treasury wallet
+    issuer: { name: "Acme LLC" },
     customer_id: globex.id,           // the saved customer supplies the payer party
     heading: "Consulting, March",
     reference: "INV-1042",
@@ -103,7 +105,7 @@ curl -fsS "$API/v1/deposit-requests" \\
   -H "Idempotency-Key: INV-1042" \\
   -d "{
     \\"amount\\": \\"1250.00\\",
-    \\"issuer_id\\": \\"iss_…\\", \\"customer_id\\": \\"cus_…\\",
+    \\"payout_address\\": \\"0x1111…\\", \\"issuer\\": { \\"name\\": \\"Acme LLC\\" }, \\"customer_id\\": \\"cus_…\\",
     \\"heading\\": \\"Consulting, March\\", \\"reference\\": \\"INV-1042\\",
     \\"attachment_id\\": \\"$ATT_ID\\",
     \\"payer_policy\\": { \\"mode\\": \\"verified_email\\", \\"expected_email\\": \\"ap@globex.example\\" },
@@ -127,19 +129,18 @@ const [byRef] = (await gum.depositRequests.list({ reference: "INV-1042" })).depo
 const { transfers } = await gum.depositRequests.transfers(byRef!.id);
 for (const t of transfers) console.log(t.sender, t.amount, t.disposition, t.transaction_hash);`;
 
-const SETUP = `// Once, at onboarding. Store the ids beside your API key.
-const acme = await gum.issuers.create({ name: "Acme LLC", contact_email: "billing@acme.example" });
-await gum.issuers.startEmailVerification(acme.id);          // a code goes to billing@acme.example
-await gum.issuers.confirmEmailVerification(acme.id, "123456");
-
-const treasury = await gum.payoutAddresses.create({ address: "0x1111…", label: "Treasury" });
-await gum.issuers.setPayoutAddresses(acme.id, [treasury.id]);
-
+const SETUP = `// Save your customers once; each supplies the payer party on later requests.
 const globex = await gum.customers.create({ name: "Globex", email: "ap@globex.example" });
 
-// From then on, the smallest possible request:
+// From then on, a request is the amount, who pays, and the policy:
 await gum.depositRequests.create(
-  { amount: "10.00", issuer_id: acme.id, customer_id: globex.id, payer_policy: { mode: "permissionless" } },
+  {
+    amount: "10.00",
+    payout_address: "0x1111…",
+    issuer: { name: "Acme LLC" },
+    customer_id: globex.id,
+    payer_policy: { mode: "permissionless" },
+  },
   crypto.randomUUID(),
 );`;
 
@@ -209,14 +210,14 @@ export default function RecipesPage() {
 
       <H2 id="set-up-once">Set up once, issue in one line</H2>
       <p>
-        Save the party you issue under, prove its mailbox, save the wallets you settle to, and save
-        your customers. After that a request is an amount, two ids, and a policy.
+        Save your customers once; each request then names the payer by id. The issuer and the
+        payout address travel on every create, and the request stores its own snapshot of both
+        parties, so editing a saved customer later never changes a request already issued.
       </p>
       <CodeBlock code={SETUP} lang="ts" />
       <p>
-        The request still stores its own snapshot of the issuer and the payer, so editing a saved
-        record later never changes a request already issued. It also remembers{" "}
-        <code>issuer_id</code> and <code>customer_id</code>, so the list route can filter by either.
+        The request also remembers the opaque <code>issuer_id</code> you passed at creation, if
+        any, and the list route filters by it and by <code>customer_id</code>.
       </p>
 
       <H2 id="reconcile">Reconcile</H2>

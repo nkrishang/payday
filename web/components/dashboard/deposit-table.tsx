@@ -1,31 +1,30 @@
 "use client";
 
-import type { Customer, Issuer, DepositRequestStatus } from "@gum/sdk";
-import { ChevronRight, Paperclip, Plus } from "lucide-react";
-import Link from "next/link";
-import { useState } from "react";
-import { AddButton } from "@/components/ui/add-button";
+import type { Customer, DepositRequestStatus } from "@gum/sdk";
+import { ChevronRight, Paperclip } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Amount } from "@/components/ui/amount";
-import { Button, buttonStyles } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { MenuSelect, type MenuOption } from "@/components/ui/menu-select";
 import { StatusDot } from "@/components/ui/status-dot";
 import { cn } from "@/lib/cn";
 import { DepositRowDetail } from "./deposit-row-detail";
 import { formatShortDate, modeLabel, STATUSES } from "./labels";
 import { LoadProblem } from "./load-problem";
-import { useResource } from "./session";
+import { useMerchant, useResource } from "./session";
 import { StatusBadge } from "./status-badge";
 import { VerificationBadge } from "./verification-status";
 
 /**
- * Every deposit request, with the three facts worth filtering on: where the
- * deposit stands, where its verification stands (a separate fact — a gated
- * request can be funded before its payer has verified), and which customer
- * it is addressed to. All three are the API's own parameters, so a filter narrows the query
- * rather than the page.
+ * Every deposit request, view-only: the dashboard issues nothing. The three
+ * facts worth filtering on are where the deposit stands, where its
+ * verification stands (a separate fact — a gated request can be funded before
+ * its payer has verified), and which customer it is addressed to. All three
+ * are the API's own parameters, so a filter narrows the query rather than the
+ * page.
  *
  * A row opens in place rather than navigating: the list is where a merchant
- * works, and leaving it to read one request and coming back to re-filter and
+ * looks, and leaving it to read one request and coming back to re-filter and
  * re-page was the cost of a click. One row is open at a time — the detail is
  * tall enough that two would make the table hard to read — and its request is
  * only fetched once it has been opened.
@@ -33,6 +32,8 @@ import { VerificationBadge } from "./verification-status";
 
 /** Short enough that the whole table is read at a glance, not scrolled. */
 const PAGE_SIZE = 5;
+/** Customer options for the filter: fetched once, pages until exhausted. */
+const CUSTOMER_PAGE = 100;
 
 type VerificationFilter = "not_required" | "pending" | "verified" | "likely_unsolicited";
 
@@ -47,40 +48,14 @@ const VERIFICATIONS: ReadonlyArray<{ value: VerificationFilter; label: string }>
   { value: "likely_unsolicited", label: "Likely unsolicited" },
 ];
 
-export function DepositTable({
-  identities,
-  customers,
-  initialOpen,
-  onCompose,
-  composeHref,
-  lockedCustomerId,
-}: {
-  /** Resolves the issuer badge on each row; the request stores only the id. */
-  identities: Issuer[];
-  customers: Customer[];
-  /** A request to open on arrival — what "Track this request" hands over. */
-  initialOpen?: string | undefined;
-  /** Opens the composer in place, on the dashboard's own table. */
-  onCompose?: (() => void) | undefined;
-  /** Issues pre-addressed to this customer instead, on a customer's own page. */
-  composeHref?: string | undefined;
-  /**
-   * Scopes the table to one customer's own requests, the way a customer's page
-   * embeds this table. The Customer filter would only ever narrow to the one
-   * customer it is already narrowed to, so it is dropped rather than shown
-   * disabled.
-   */
-  lockedCustomerId?: string | undefined;
-}) {
-  const [openId, setOpenId] = useState<string | null>(initialOpen ?? null);
+export function DepositTable() {
+  const [openId, setOpenId] = useState<string | null>(null);
   // Rows that have been opened at least once keep their detail mounted, so
   // coming back to one costs nothing and a closed row costs no request at all.
-  const [fetched, setFetched] = useState<ReadonlySet<string>>(
-    () => new Set(initialOpen ? [initialOpen] : []),
-  );
+  const [fetched, setFetched] = useState<ReadonlySet<string>>(() => new Set());
   const [status, setStatus] = useState<DepositRequestStatus | "">("");
   const [verification, setVerification] = useState<VerificationFilter | "">("");
-  const [customer, setCustomer] = useState(lockedCustomerId ?? "");
+  const [customer, setCustomer] = useState("");
   // Cursors of the pages visited, so "Previous" is a pop rather than a re-walk.
   const [cursors, setCursors] = useState<string[]>([]);
   const after = cursors[cursors.length - 1];
@@ -98,8 +73,6 @@ export function DepositTable({
   );
 
   const requests = page.data?.deposit_requests ?? [];
-  const issuerName = (id: string | null) =>
-    identities.find((identity) => identity.id === id)?.name ?? null;
 
   // Paging controls earn their place only when there is another page to reach.
   const paged = cursors.length > 0 || Boolean(page.data?.next_cursor);
@@ -114,36 +87,23 @@ export function DepositTable({
     setFetched((current) => (current.has(id) ? current : new Set([...current, id])));
   };
 
-  // The locked customer is not a filter the page applied; it is scope the
-  // caller already narrowed to, so it should not read "no matches" for a
-  // customer with no requests at all.
-  const filtered = Boolean(status || verification || (!lockedCustomerId && customer));
-
-  // The columns a phone drops. The customer's own table is three columns and
-  // already fits, so there they stay.
-  const wide = lockedCustomerId ? "" : WIDE_CELL;
+  const filtered = Boolean(status || verification || customer);
 
   return (
     <section aria-label="Deposits">
-      {lockedCustomerId ? null : (
-        <div>
-          <h1 className="font-heading text-[30px] leading-tight font-medium tracking-[-0.045em]">
-            Deposits.
-          </h1>
-          <p className="mt-1.5 text-[13px] text-muted">
-            Create deposit requests, monitor them and filter them by status.
-          </p>
-        </div>
-      )}
+      <div>
+        <h1 className="font-heading text-[30px] leading-tight font-medium tracking-[-0.045em]">
+          Deposits.
+        </h1>
+        <p className="mt-1.5 text-[13px] text-muted">
+          Monitor deposits and filter them by status. New deposit requests are
+          created through the API.
+        </p>
+      </div>
 
       {/* The control sits with the filters rather than beside the heading: both
           act on the table under them, and both end at its right edge. */}
-      <div
-        className={cn(
-          "flex flex-wrap items-end justify-between gap-3",
-          lockedCustomerId ? "" : "mt-6",
-        )}
-      >
+      <div className="mt-6 flex flex-wrap items-end justify-between gap-3">
         <div className="flex flex-wrap items-end gap-3">
           <MenuSelect
             label="Status"
@@ -183,37 +143,13 @@ export function DepositTable({
               })),
             ]}
           />
-          {lockedCustomerId ? null : (
-            <MenuSelect
-              label="Customer"
-              className="w-[190px]"
-              value={customer}
-              onChange={(next) => narrow(() => setCustomer(next))}
-              options={[
-                { value: "", label: "Any customer" },
-                ...customers.map((entry): MenuOption => ({ value: entry.id, label: entry.name })),
-              ]}
-            />
-          )}
+          <CustomerFilter value={customer} onChange={(next) => narrow(() => setCustomer(next))} />
         </div>
-        <div className="flex items-center gap-3">
-          {page.loading ? (
-            <span role="status" className="text-[12px] text-faint">
-              Loading…
-            </span>
-          ) : null}
-          {onCompose ? (
-            <AddButton label="New deposit request" onClick={onCompose} />
-          ) : composeHref ? (
-            <Link
-              href={composeHref}
-              aria-label="New deposit request for this customer"
-              className={cn(buttonStyles({ size: "sm" }), "w-9 px-0")}
-            >
-              <Plus className="size-4" />
-            </Link>
-          ) : null}
-        </div>
+        {page.loading ? (
+          <span role="status" className="text-[12px] text-faint">
+            Loading…
+          </span>
+        ) : null}
       </div>
 
       {page.error ? (
@@ -232,11 +168,6 @@ export function DepositTable({
             column whatever the rows hold — including when there are none.
             Request is the widest because it also carries the disclosure
             control, and anything it clips is a line away in the open row.
-            On a customer's own page, status, policy, verification, and when
-            it was created all read faster as a picture than as more columns,
-            and the open row already draws that picture — so that table stays
-            to what is scanned across many requests at once: what, who, and
-            how much.
 
             Below `md` the eight columns become two — the request and its
             amount, with the status under the amount — rather than a 960px
@@ -244,61 +175,42 @@ export function DepositTable({
             here, and it has to be as wide as the phone, not the table. The
             hidden columns' `<col>`s are hidden too, or a fixed layout would
             keep dealing them their share of the width. */}
-        <table
-          className={cn("w-full table-fixed text-[13px]", !lockedCustomerId && "md:min-w-[960px]")}
-        >
+        <table className="w-full table-fixed text-[13px] md:min-w-[960px]">
           <colgroup>
-            {lockedCustomerId ? (
-              <>
-                <col className="w-[54%]" />
-                <col className="w-[24%]" />
-                <col className="w-[22%]" />
-              </>
-            ) : (
-              <>
-                <col className="w-[60%] md:w-[17%]" />
-                <col className={cn(WIDE_COL, "md:w-[9%]")} />
-                <col className={cn(WIDE_COL, "md:w-[11%]")} />
-                <col className="w-[40%] md:w-[10%]" />
-                <col className={cn(WIDE_COL, "md:w-[16%]")} />
-                <col className={cn(WIDE_COL, "md:w-[12%]")} />
-                <col className={cn(WIDE_COL, "md:w-[15%]")} />
-                <col className={cn(WIDE_COL, "md:w-[10%]")} />
-              </>
-            )}
+            <col className="w-[60%] md:w-[17%]" />
+            <col className={cn(WIDE_COL, "md:w-[11%]")} />
+            <col className={cn(WIDE_COL, "md:w-[10%]")} />
+            <col className="w-[40%] md:w-[10%]" />
+            <col className={cn(WIDE_COL, "md:w-[16%]")} />
+            <col className={cn(WIDE_COL, "md:w-[12%]")} />
+            <col className={cn(WIDE_COL, "md:w-[15%]")} />
+            <col className={cn(WIDE_COL, "md:w-[10%]")} />
           </colgroup>
           <thead className="border-b border-line text-[11px] font-medium tracking-[0.1em] text-faint uppercase">
             <tr>
               <th className="px-4 py-3 text-left font-medium whitespace-nowrap">Request</th>
-              <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
-                Issued by
+              <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", WIDE_CELL)}>
+                Payer
               </th>
-              {lockedCustomerId ? null : (
-                <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
-                  Payer
-                </th>
-              )}
+              <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", WIDE_CELL)}>
+                Issuer ID
+              </th>
               <th className="px-4 py-3 text-right font-medium whitespace-nowrap">Amount</th>
-              {lockedCustomerId ? null : (
-                <>
-                  <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
-                    Status
-                  </th>
-                  <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
-                    Policy
-                  </th>
-                  <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", wide)}>
-                    Verification
-                  </th>
-                  <th className={cn("px-4 py-3 text-right font-medium whitespace-nowrap", wide)}>
-                    Created
-                  </th>
-                </>
-              )}
+              <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", WIDE_CELL)}>
+                Status
+              </th>
+              <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", WIDE_CELL)}>
+                Policy
+              </th>
+              <th className={cn("px-4 py-3 text-left font-medium whitespace-nowrap", WIDE_CELL)}>
+                Verification
+              </th>
+              <th className={cn("px-4 py-3 text-right font-medium whitespace-nowrap", WIDE_CELL)}>
+                Created
+              </th>
             </tr>
           </thead>
           {requests.map((request) => {
-            const issuer = issuerName(request.issuer_id);
             const open = openId === request.id;
             const title = request.heading ?? request.reference ?? "Untitled request";
             return (
@@ -345,55 +257,41 @@ export function DepositTable({
                       </span>
                     ) : null}
                   </td>
-                  <td className={cn("px-4 py-3 text-left", wide)}>
-                    {issuer ? (
-                      <span className="inline-flex max-w-[160px] items-center rounded-full border border-line-strong bg-raised px-2 py-0.5 text-[11.5px]">
-                        <span className="truncate">{issuer}</span>
-                      </span>
-                    ) : (
-                      <span className="text-faint">—</span>
-                    )}
+                  <td className={cn("truncate px-4 py-3 text-left", WIDE_CELL)}>
+                    {request.payer_name}
                   </td>
-                  {lockedCustomerId ? null : (
-                    <td className={cn("truncate px-4 py-3 text-left", wide)}>
-                      {request.payer_name}
-                    </td>
-                  )}
+                  <td className={cn("truncate px-4 py-3 text-left font-mono text-[12px]", WIDE_CELL)}>
+                    {request.issuer_id ?? <span className="text-faint">—</span>}
+                  </td>
                   <td className="px-4 py-3 text-right">
                     <Amount value={request.amount} currency={request.currency} />
-                    {lockedCustomerId ? null : (
-                      <span className="mt-1.5 flex justify-end md:hidden">
-                        <StatusBadge status={request.status} />
-                      </span>
-                    )}
+                    <span className="mt-1.5 flex justify-end md:hidden">
+                      <StatusBadge status={request.status} />
+                    </span>
                   </td>
-                  {lockedCustomerId ? null : (
-                    <>
-                      <td className={cn("px-4 py-3 text-left", wide)}>
-                        <StatusBadge status={request.status} />
-                      </td>
-                      <td className={cn("truncate px-4 py-3 text-left", wide)}>
-                        {modeLabel(request.payer_policy_mode)}
-                      </td>
-                      <td className={cn("px-4 py-3 text-left", wide)}>
-                        <VerificationBadge
-                          mode={request.payer_policy_mode}
-                          completedAt={request.verification_completed_at}
-                          unsolicitedAt={request.likely_unsolicited_at}
-                        />
-                      </td>
-                      <td className={cn("px-4 py-3 text-right whitespace-nowrap text-muted", wide)}>
-                        {formatShortDate(request.created_at)}
-                      </td>
-                    </>
-                  )}
+                  <td className={cn("px-4 py-3 text-left", WIDE_CELL)}>
+                    <StatusBadge status={request.status} />
+                  </td>
+                  <td className={cn("truncate px-4 py-3 text-left", WIDE_CELL)}>
+                    {modeLabel(request.payer_policy_mode)}
+                  </td>
+                  <td className={cn("px-4 py-3 text-left", WIDE_CELL)}>
+                    <VerificationBadge
+                      mode={request.payer_policy_mode}
+                      completedAt={request.verification_completed_at}
+                      unsolicitedAt={request.likely_unsolicited_at}
+                    />
+                  </td>
+                  <td className={cn("px-4 py-3 text-right whitespace-nowrap text-muted", WIDE_CELL)}>
+                    {formatShortDate(request.created_at)}
+                  </td>
                 </tr>
 
                 {/* Kept in the tree so its height can animate, and inert while
                     closed so nothing inside is reachable by tab or by a
                     screen reader. */}
                 <tr>
-                  <td colSpan={lockedCustomerId ? 3 : 8} className="p-0">
+                  <td colSpan={8} className="p-0">
                     <div className="dash-expand" data-open={open}>
                       <div inert={!open} className="border-t border-line">
                         {fetched.has(request.id) ? <DepositRowDetail id={request.id} /> : null}
@@ -407,8 +305,8 @@ export function DepositTable({
           {!page.loading && requests.length === 0 ? (
             <tbody>
               <tr>
-                <td colSpan={lockedCustomerId ? 3 : 8} className="px-4 py-10 text-center text-muted">
-                  {filtered ? "No deposit requests match these filters." : "No deposit requests yet."}
+                <td colSpan={8} className="px-4 py-10 text-center text-muted">
+                  {filtered ? "No deposits match these filters." : "No deposits yet."}
                 </td>
               </tr>
             </tbody>
@@ -440,5 +338,90 @@ export function DepositTable({
         </div>
       ) : null}
     </section>
+  );
+}
+
+/**
+ * The customer filter's options, loaded here rather than owned by the page:
+ * the dashboard no longer manages customers, so this is the one place that
+ * names them. Pages through the whole list — a filter that silently omitted
+ * customers past its first hundred would narrow the wrong thing.
+ */
+function CustomerFilter({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const { client } = useMerchant();
+  const first = useResource("customers:filter", (gum) =>
+    gum.customers.list({ limit: CUSTOMER_PAGE }),
+  );
+  const [rest, setRest] = useState<Customer[]>([]);
+  const [pagesFailed, setPagesFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
+
+  // Continue past the first page in the background, following the cursor
+  // until the list is exhausted — a filter that silently omitted customers
+  // past its first hundred would narrow the wrong thing. Each run replaces
+  // what an earlier run collected (the client, and with it the identity
+  // token, can change mid-life) rather than appending to it, so a token
+  // refresh never duplicates an option.
+  const cursor = first.data?.next_cursor ?? null;
+  useEffect(() => {
+    if (!cursor) return;
+    let disposed = false;
+    (async () => {
+      const collected: Customer[] = [];
+      try {
+        let next: string | null = cursor;
+        while (next) {
+          const page = await client.customers.list({ limit: CUSTOMER_PAGE, starting_after: next });
+          collected.push(...page.customers);
+          next = page.next_cursor ?? null;
+        }
+        if (!disposed) {
+          setRest(collected);
+          setPagesFailed(false);
+        }
+      } catch {
+        // Whatever pages came back stay usable; the missing ones are called
+        // out below, with a retry, rather than silently narrowing the
+        // filter's choices.
+        if (!disposed) setPagesFailed(true);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [cursor, client, retry]);
+
+  // Without a cursor the first page is the whole list, so anything an
+  // earlier run collected is stale; ignoring it here keeps a token refresh
+  // from duplicating an option.
+  const firstCustomers = first.data?.customers ?? [];
+  const options = cursor ? [...firstCustomers, ...rest] : firstCustomers;
+  return (
+    <>
+      <MenuSelect
+        label="Customer"
+        className="w-[190px]"
+        value={value}
+        onChange={onChange}
+        options={[
+          { value: "", label: "Any customer" },
+          ...options.map((entry): MenuOption => ({ value: entry.id, label: entry.name })),
+        ]}
+      />
+      {pagesFailed ? (
+        <LoadProblem
+          compact
+          title="Couldn't load every customer."
+          message="The customer filter may be missing some names."
+          onRetry={() => setRetry((attempt) => attempt + 1)}
+        />
+      ) : null}
+    </>
   );
 }

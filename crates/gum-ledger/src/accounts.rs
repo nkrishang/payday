@@ -266,6 +266,7 @@ impl AccountRepository {
         if let Some(existing) = self.identity_account(issuer, subject, &self.pool).await? {
             let account = existing?;
             self.adopt_wallet(account, wallet_address).await?;
+            self.adopt_email(account, verified_email).await?;
             return Ok(account);
         }
         // Two first sign-ins for one identity race here; the same lock the
@@ -280,6 +281,7 @@ impl AccountRepository {
             let account = existing?;
             tx.commit().await?;
             self.adopt_wallet(account, wallet_address).await?;
+            self.adopt_email(account, verified_email).await?;
             return Ok(account);
         }
         let id = Uuid::now_v7();
@@ -320,6 +322,24 @@ impl AccountRepository {
         .bind(account.0)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// Records the verified email the identity provider currently reports
+    /// when it differs from what is stored. The dashboard can change the
+    /// sign-in email, and the account view and payer email read this
+    /// column, so an unchanged row would keep reporting the old address
+    /// until an unrelated key rotation happened to refresh it.
+    async fn adopt_email(
+        &self,
+        account: AccountId,
+        verified_email: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE accounts SET email = $1 WHERE id = $2 AND email IS DISTINCT FROM $1")
+            .bind(verified_email)
+            .bind(account.0)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -687,8 +707,13 @@ mod tests {
         assert!(repo.has_verified_email(first).await.unwrap());
         assert_eq!(
             metadata.email.as_deref(),
-            Some("one@example.com"),
-            "the first verified email sticks"
+            Some("changed@example.com"),
+            "a later session's verified email is kept current"
+        );
+        assert_eq!(
+            repo.metadata(first).await.unwrap().email.as_deref(),
+            Some("changed@example.com"),
+            "the account view reads the updated email"
         );
 
         // A later session naming no wallet does not forget the one stored; a

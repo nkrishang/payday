@@ -10,7 +10,6 @@ import {
   Paperclip,
   ShieldCheck,
 } from "lucide-react";
-import Link from "next/link";
 import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Problem } from "@/components/ui/field";
@@ -161,7 +160,7 @@ function Loaded({ payment }: { payment: DepositRequest }) {
         <ExternalLink aria-hidden="true" className="size-3 shrink-0 text-faint" />
       </p>
 
-      {payment.notes || payment.payer.details || payment.customer_id ? (
+      {payment.notes || payment.payer.details || payment.customer_id || payment.issuer_id ? (
         <Panel label="Document">
           <Facts>
             {payment.payer.email ? (
@@ -179,12 +178,12 @@ function Loaded({ payment }: { payment: DepositRequest }) {
             ) : null}
             {payment.customer_id ? (
               <Fact label="Customer">
-                <Link
-                  href={`/dashboard/customers/${encodeURIComponent(payment.customer_id)}`}
-                  className="underline underline-offset-2"
-                >
-                  Open customer
-                </Link>
+                <span className={cn(MONO)}>{payment.customer_id}</span>
+              </Fact>
+            ) : null}
+            {payment.issuer_id ? (
+              <Fact label="Issuer ID">
+                <span className={cn(MONO)}>{payment.issuer_id}</span>
               </Fact>
             ) : null}
           </Facts>

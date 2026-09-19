@@ -6,9 +6,9 @@ import { SiteHeader } from "@/components/site-header";
  * states. Full-page use (`/pay/[id]`, its error and not-found states) opts
  * into `.gum` (see globals.css) so the hosted checkout reads as the same
  * product as the landing page and dashboard — same palette, same type —
- * rather than falling back to a generic light/dark scheme. Embedded use (the
- * dashboard onboarding walkthrough's live payer preview) skips it: it already
- * sits inside the dashboard's own `.gum`-themed tree.
+ * rather than falling back to a generic light/dark scheme. Embedded use (a
+ * preview dropped inside another page) skips it: it already sits inside that
+ * page's own `.gum`-themed tree.
  *
  * The page is the landing page's picture of itself (the phone in "Embed in
  * your app"): the site's header, the card, and "Secured by Gum" under it

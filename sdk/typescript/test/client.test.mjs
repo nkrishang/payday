@@ -64,6 +64,20 @@ test("create rejects a missing idempotency key before fetch", () => {
   assert.equal(mock.calls.length, 0);
 });
 
+test("an opaque issuer id is sent verbatim and filters by exact string", async () => {
+  const mock = mockFetch(() => json({ id: "dr_1", status: "awaiting_deposit" }, 201));
+  const client = new GumClient({ apiKey: "secret", baseUrl: "https://example.test", fetch: mock.fetch });
+
+  // Any 1–255 byte value is the merchant's to define; the client does not
+  // interpret it, and the list filter round-trips it exactly — including
+  // characters that need URL encoding.
+  await client.depositRequests.create({ ...request, issuer_id: "acme/eu 2026" }, "order-124");
+  assert.equal(JSON.parse(mock.calls[0].init.body).issuer_id, "acme/eu 2026");
+
+  await client.depositRequests.list({ issuer_id: "acme/eu 2026" });
+  assert.equal(mock.calls[1].url, "https://example.test/v1/deposit-requests?issuer_id=acme%2Feu+2026");
+});
+
 test("the client takes exactly one credential and sends either as the bearer", async () => {
   assert.throws(() => new GumClient({}), /exactly one of apiKey or accessToken/);
   assert.throws(

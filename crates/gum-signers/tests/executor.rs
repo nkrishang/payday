@@ -15,8 +15,8 @@ use gum_chain::SweepOutcome;
 use gum_chain::mock::{self, MockChain};
 use gum_contracts::{
     AbandonReason, BusMessage, ChainControl, CorrelationId, ExecutionCommand, ExecutionEvent,
-    OnboardingPaymentCommand, StepPrecondition, StepResult, SweepBatchCommand, SweepItem,
-    SweepItemOutcome, SweepItemStatus, WithdrawalStepCommand, WithdrawalStepKind,
+    StepPrecondition, StepResult, SweepBatchCommand, SweepItem, SweepItemOutcome, SweepItemStatus,
+    WithdrawalStepCommand, WithdrawalStepKind,
 };
 use gum_core::{
     Amount, BeneficiaryAddress, ChainConfig, ChainId, Currency, FinalitySource, RecoveryAddress,
@@ -28,7 +28,6 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 const LATEST: u64 = 100;
-const ONBOARDING_PAYER: Address = Address::repeat_byte(0xB0);
 
 fn config() -> ChainConfig {
     ChainConfig {
@@ -77,9 +76,6 @@ impl Harness {
     }
 
     fn with_policy(pool: PgPool, chain: MockChain, policy: Policy) -> Self {
-        chain.set(|state| {
-            state.dedicated_signers.insert(ONBOARDING_PAYER);
-        });
         let chain = Arc::new(chain);
         let wake = Arc::new(Notify::new());
         let worker = ChainWorker::new(chain.clone(), config(), pool.clone(), policy, wake.clone());
@@ -88,10 +84,7 @@ impl Harness {
             pool,
             chain,
             worker,
-            commands: CommandHandler::new_with_onboarding(
-                wakers,
-                HashMap::from([(mock::CHAIN_ID, ONBOARDING_PAYER)]),
-            ),
+            commands: CommandHandler::new(wakers),
         }
     }
 
@@ -227,17 +220,6 @@ fn step(precondition: Option<StepPrecondition>, not_after: Option<u64>) -> Execu
         gas_limit: 120_000,
         precondition,
         not_after,
-    })
-}
-
-fn onboarding() -> ExecutionCommand {
-    ExecutionCommand::OnboardingPayment(OnboardingPaymentCommand {
-        job_id: Uuid::now_v7(),
-        chain_id: mock::CHAIN_ID,
-        payer: ONBOARDING_PAYER,
-        token: mock::usdc(),
-        recipient: Address::repeat_byte(0x44),
-        amount: U256::from(1_000_000),
     })
 }
 
@@ -562,76 +544,6 @@ async fn a_consumed_withdrawal_nonce_reconciles_the_financial_precondition(pool:
 }
 
 #[sqlx::test(migrator = "gum_schema::MIGRATOR")]
-async fn onboarding_redelivery_reuses_the_persisted_transaction(pool: PgPool) {
-    let h = Harness::new(pool, MockChain::new(LATEST).with(|s| s.mine_at = None));
-    let command = onboarding();
-    h.deliver(&command).await;
-    h.pass().await;
-    let first = h.open().await;
-    assert_eq!(first.len(), 1);
-    assert_eq!(first[0].attempts.len(), 1);
-    assert_eq!(h.chain.submissions().len(), 1);
-    assert!(matches!(
-        h.events().await.as_slice(),
-        [ExecutionEvent::OnboardingPaymentSubmitted { job_id, .. }] if *job_id == command.job_id()
-    ));
-
-    // Simulate the server retrying before it consumed the submission event.
-    h.deliver(&command).await;
-    assert_eq!(h.chain.submissions().len(), 1);
-    assert_eq!(
-        h.open().await[0].attempts[0].raw_transaction,
-        first[0].attempts[0].raw_transaction
-    );
-}
-
-#[sqlx::test(migrator = "gum_schema::MIGRATOR")]
-async fn onboarding_receipt_restores_an_event_lost_after_broadcast(pool: PgPool) {
-    let h = Harness::new(pool, MockChain::new(LATEST));
-    let command = onboarding();
-    h.deliver(&command).await;
-    h.pass().await;
-    let transaction = h.open().await.remove(0);
-    let initial_hash = transaction.attempts[0].tx_hash;
-
-    // Simulate the node accepting the transaction and the process crashing
-    // before mark_broadcast and event publication committed.
-    sqlx::query(
-        "DELETE FROM bus.deliveries WHERE message_id IN (SELECT id FROM bus.messages WHERE topic = $1)",
-    )
-    .bind(ExecutionEvent::TOPIC)
-    .execute(&h.pool)
-    .await
-    .unwrap();
-    sqlx::query("DELETE FROM bus.messages WHERE topic = $1")
-        .bind(ExecutionEvent::TOPIC)
-        .execute(&h.pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE execution.transaction_attempts SET broadcast_at = NULL WHERE transaction_id = $1",
-    )
-    .bind(transaction.id)
-    .execute(&h.pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE execution.transactions SET state = 'prepared', broadcast_at = NULL WHERE id = $1",
-    )
-    .bind(transaction.id)
-    .execute(&h.pool)
-    .await
-    .unwrap();
-
-    h.pass().await;
-    assert_eq!(h.job_state(command.job_id()).await, "finalized");
-    assert!(matches!(
-        h.events().await.as_slice(),
-        [ExecutionEvent::OnboardingPaymentSubmitted { tx_hash, .. }] if *tx_hash == initial_hash
-    ));
-}
-
-#[sqlx::test(migrator = "gum_schema::MIGRATOR")]
 async fn a_receipt_whose_block_left_the_canonical_chain_is_forgotten(pool: PgPool) {
     let h = Harness::new(pool, MockChain::new(LATEST));
     let command = sweep(vec![item(1, 10)]);
@@ -711,48 +623,6 @@ async fn one_signer_runs_one_transaction_at_a_time(pool: PgPool) {
     h.pass().await;
     assert_eq!(h.job_state(second.job_id()).await, "queued");
     assert!(h.chain.submissions().iter().all(|s| s.nonce == 0));
-}
-
-#[sqlx::test(migrator = "gum_schema::MIGRATOR")]
-async fn a_busy_onboarding_lane_does_not_block_the_ordinary_pool(pool: PgPool) {
-    let h = Harness::new(
-        pool,
-        MockChain::new(LATEST).with(|state| state.mine_at = None),
-    );
-    let first = onboarding();
-    h.deliver(&first).await;
-    h.pass().await;
-
-    let second = onboarding();
-    let sweep = sweep(vec![item(1, 10)]);
-    h.deliver(&second).await;
-    h.deliver(&sweep).await;
-    let report = h.pass().await;
-
-    assert_eq!(report.started, 1);
-    assert_eq!(h.job_state(second.job_id()).await, "queued");
-    assert_eq!(h.job_state(sweep.job_id()).await, "executing");
-    assert_eq!(h.open().await.len(), 2);
-}
-
-#[sqlx::test(migrator = "gum_schema::MIGRATOR")]
-async fn a_pending_onboarding_nonce_does_not_consume_an_ordinary_signer(pool: PgPool) {
-    let h = Harness::new(
-        pool,
-        MockChain::new(LATEST).with(|state| {
-            state.mine_at = None;
-            state.pending_nonces.insert(ONBOARDING_PAYER, 1);
-        }),
-    );
-    let onboarding = onboarding();
-    let sweep = sweep(vec![item(1, 10)]);
-    h.deliver(&onboarding).await;
-    h.deliver(&sweep).await;
-
-    let report = h.pass().await;
-    assert_eq!(report.started, 1);
-    assert_eq!(h.job_state(onboarding.job_id()).await, "queued");
-    assert_eq!(h.job_state(sweep.job_id()).await, "executing");
 }
 
 #[sqlx::test(migrator = "gum_schema::MIGRATOR")]

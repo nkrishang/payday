@@ -2,7 +2,6 @@ import { ACCOUNT_GROUP, STATUS_GROUP } from "./account";
 import { ATTACHMENTS } from "./attachments";
 import { CUSTOMERS } from "./customers";
 import { DEPOSIT_REQUESTS } from "./deposit-requests";
-import { ISSUERS, PAYOUT_ADDRESSES } from "./issuers";
 import { PAYER } from "./payer";
 import { type EndpointDoc, type EndpointGroup, endpointHref } from "./types";
 import { WEBHOOKS } from "./webhooks";
@@ -12,8 +11,6 @@ import { WITHDRAWALS } from "./withdrawals";
 export const API_GROUPS: ReadonlyArray<EndpointGroup> = [
   DEPOSIT_REQUESTS,
   CUSTOMERS,
-  ISSUERS,
-  PAYOUT_ADDRESSES,
   WITHDRAWALS,
   ATTACHMENTS,
   WEBHOOKS,

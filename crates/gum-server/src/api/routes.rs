@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::http::{HeaderName, Method, header};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post};
 use axum::{Router, middleware};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -15,7 +15,6 @@ use crate::api::auth;
 use crate::api::customers;
 use crate::api::deposit_requests;
 use crate::api::health;
-use crate::api::issuers;
 use crate::api::merchant_session;
 use crate::api::payer;
 use crate::api::payer_verification;
@@ -42,9 +41,6 @@ pub fn router(state: AppState) -> Router {
     );
     let merchant_cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list([state.payer.origin_header()]))
-        // PUT and DELETE joined the list with issuer identities: the dashboard
-        // sets an identity's wallets with PUT and drops a saved wallet with
-        // DELETE, and a method missing here fails the preflight, not the call.
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -85,10 +81,6 @@ pub fn router(state: AppState) -> Router {
             post(deposit_requests::cancel_deposit_request),
         )
         .route(
-            "/v1/deposit-requests/{id}/onboarding-deposit",
-            post(deposit_requests::onboarding_deposit),
-        )
-        .route(
             "/v1/deposit-requests/{id}/transfers",
             get(deposit_requests::transfers),
         )
@@ -116,33 +108,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/customers",
             post(customers::create).get(customers::list),
-        )
-        .route("/v1/issuers", post(issuers::create).get(issuers::list))
-        .route(
-            "/v1/issuers/{id}",
-            get(issuers::get)
-                .patch(issuers::update)
-                .delete(issuers::delete),
-        )
-        .route(
-            "/v1/issuers/{id}/verify/email/start",
-            post(issuers::start_email_verification),
-        )
-        .route(
-            "/v1/issuers/{id}/verify/email/confirm",
-            post(issuers::confirm_email_verification),
-        )
-        .route(
-            "/v1/issuers/{id}/payout-addresses",
-            put(issuers::set_payout_addresses),
-        )
-        .route(
-            "/v1/payout-addresses",
-            post(issuers::create_payout_address).get(issuers::list_payout_addresses),
-        )
-        .route(
-            "/v1/payout-addresses/{id}",
-            delete(issuers::delete_payout_address),
         )
         .route(
             "/v1/customers/{id}",
@@ -180,7 +145,7 @@ pub fn router(state: AppState) -> Router {
     // parallel with Privy sending the code — so it cannot sit behind
     // `require_account` like the routes above. Still only the dashboard
     // origin, and its own tiny body limit: one email, nothing else.
-    let merchant_onboarding = Router::new()
+    let merchant_signup = Router::new()
         .route(
             "/v1/wallets/pregenerate",
             post(wallet_pregeneration::pregenerate),
@@ -274,7 +239,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .merge(payer)
         .merge(payer_verification)
-        .merge(merchant_onboarding)
+        .merge(merchant_signup)
         .route("/openapi.json", get(openapi::spec))
         .route("/docs", get(openapi::reference))
         .route("/api", get(openapi::reference))
@@ -319,8 +284,8 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use gum_core::{
-        AttachmentId, ChainId, CustomerId, Invoice, IssuerId, PayoutAddressId, ProofError,
-        ProofOfPayment, WebhookId, verify_proof,
+        AttachmentId, ChainId, CustomerId, Invoice, ProofError, ProofOfPayment, WebhookId,
+        verify_proof,
     };
     use gum_ledger::{AccountId, AccountRepository, InvoiceRepository};
     use jsonwebtoken::{DecodingKey, EncodingKey};
@@ -568,7 +533,6 @@ mod tests {
             Some(store),
             Some(attestor()),
             payer_verification,
-            None,
             pregenerated_wallets,
             Some(chain.clone() as Arc<dyn ChainReads>),
             relay,
@@ -4008,439 +3972,6 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
-    async fn an_issuer_identity_proves_its_contact_mailbox_before_it_counts(pool: PgPool) {
-        let (app, tenant) = app_with_payer_verification(pool.clone()).await;
-
-        let created = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                "/v1/issuers",
-                &json!({"name": "Acme Inc.", "contact_email": "Billing@Acme.example"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(created.status(), StatusCode::CREATED);
-        let created = json_body(created).await;
-        let id = created["id"].as_str().unwrap().to_owned();
-        assert_eq!(
-            created["contact_email"], "billing@acme.example",
-            "the address is normalized on the way in"
-        );
-        assert_eq!(created["email_verified"], false);
-        assert!(created["payout_addresses"].as_array().unwrap().is_empty());
-
-        // One name per account, so two identities are never the same row to a
-        // merchant reading a list.
-        for taken in ["Acme Inc.", "acme inc.", "  ACME INC.  "] {
-            let refused = app
-                .clone()
-                .oneshot(json_request(
-                    "POST",
-                    KEY,
-                    "/v1/issuers",
-                    &json!({"name": taken, "contact_email": "other@acme.example"}),
-                ))
-                .await
-                .unwrap();
-            assert_eq!(refused.status(), StatusCode::CONFLICT, "{taken}");
-            assert_eq!(
-                json_body(refused).await["error"]["code"],
-                "issuer_name_taken"
-            );
-        }
-
-        // The address is the stored one; nothing in the request names it.
-        let started = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                &format!("/v1/issuers/{id}/verify/email/start"),
-                &json!({}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(started.status(), StatusCode::ACCEPTED);
-        assert_eq!(
-            json_body(started).await["contact_email"],
-            "billing@acme.example"
-        );
-        assert_eq!(
-            tenant.started.lock().unwrap().as_slice(),
-            ["billing@acme.example"]
-        );
-
-        // One code per identity per minute, whoever asks.
-        let again = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                &format!("/v1/issuers/{id}/verify/email/start"),
-                &json!({}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            json_body(again).await["error"]["code"],
-            "otp_resend_cooldown"
-        );
-
-        let wrong = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                &format!("/v1/issuers/{id}/verify/email/confirm"),
-                &json!({"otp": "000000"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(json_body(wrong).await["error"]["code"], "otp_invalid");
-
-        let confirmed = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                &format!("/v1/issuers/{id}/verify/email/confirm"),
-                &json!({"otp": OTP}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(confirmed.status(), StatusCode::OK);
-        let confirmed = json_body(confirmed).await;
-        assert_eq!(confirmed["email_verified"], true);
-        assert!(confirmed["email_verified_at"].is_string());
-
-        // Once proven there is nothing left to send or confirm.
-        let spent = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                &format!("/v1/issuers/{id}/verify/email/start"),
-                &json!({}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(spent.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            json_body(spent).await["error"]["code"],
-            "issuer_email_already_verified"
-        );
-
-        // A rename alone never touches the proven mailbox: the update is
-        // partial, so the fields left out keep their values.
-        let renamed = json_body(
-            app.clone()
-                .oneshot(json_request(
-                    "PATCH",
-                    KEY,
-                    &format!("/v1/issuers/{id}"),
-                    &json!({"name": "Acme Inc."}),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(renamed["name"], "Acme Inc.");
-        assert_eq!(renamed["contact_email"], "billing@acme.example");
-        assert_eq!(renamed["email_verified"], true);
-
-        // Moving the mailbox is a new claim, and starts unproven.
-        let moved = app
-            .clone()
-            .oneshot(json_request(
-                "PATCH",
-                KEY,
-                &format!("/v1/issuers/{id}"),
-                &json!({"contact_email": "support@acme.example"}),
-            ))
-            .await
-            .unwrap();
-        let moved = json_body(moved).await;
-        assert_eq!(moved["email_verified"], false);
-        assert_eq!(moved["name"], "Acme Inc.");
-
-        // Nobody else's identity, listed or fetched.
-        let theirs = other_account(&pool, "gum_live_ffffffffffffffffffffffffffffffff").await;
-        let _ = theirs;
-        let foreign = app
-            .clone()
-            .oneshot(get_request(
-                "gum_live_ffffffffffffffffffffffffffffffff",
-                &format!("/v1/issuers/{id}"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            json_body(foreign).await["error"]["code"],
-            "issuer_not_found"
-        );
-    }
-
-    #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
-    async fn payout_addresses_are_saved_once_and_attached_to_identities(pool: PgPool) {
-        let app = app(pool.clone()).await;
-        let wallet = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8";
-        let checksummed = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
-        const OTHER_WALLET: &str = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
-
-        let saved = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                "/v1/payout-addresses",
-                &json!({"address": wallet, "label": "Treasury"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(saved.status(), StatusCode::CREATED);
-        let saved = json_body(saved).await;
-        assert_eq!(
-            saved["address"], checksummed,
-            "stored EIP-55 whatever case it arrived in"
-        );
-        let address_id = saved["id"].as_str().unwrap().to_owned();
-
-        // The same wallet again is the same row, not a second one.
-        let repeat = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                "/v1/payout-addresses",
-                &json!({"address": checksummed}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(json_body(repeat).await["id"], address_id);
-        let listed = app
-            .clone()
-            .oneshot(get_request(KEY, "/v1/payout-addresses"))
-            .await
-            .unwrap();
-        assert_eq!(
-            json_body(listed).await["payout_addresses"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1,
-            "saving the same wallet twice is one row"
-        );
-
-        let rejected = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                "/v1/payout-addresses",
-                &json!({"address": "0xnope"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
-
-        // A label is a short handle, not free text.
-        for label in [
-            "This label is far too long to be one",
-            "-leading",
-            "semi;colon",
-            "emoji 🙂",
-        ] {
-            let refused = app
-                .clone()
-                .oneshot(json_request(
-                    "POST",
-                    KEY,
-                    "/v1/payout-addresses",
-                    &json!({"address": OTHER_WALLET, "label": label}),
-                ))
-                .await
-                .unwrap();
-            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{label}");
-        }
-        let accepted = app
-            .clone()
-            .oneshot(json_request(
-                "POST",
-                KEY,
-                "/v1/payout-addresses",
-                &json!({"address": OTHER_WALLET, "label": "Ops (EU) & co."}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(accepted.status(), StatusCode::CREATED);
-
-        let issuer = json_body(
-            app.clone()
-                .oneshot(json_request(
-                    "POST",
-                    KEY,
-                    "/v1/issuers",
-                    &json!({"name": "Acme", "contact_email": "billing@acme.example"}),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        let issuer_id = issuer["id"].as_str().unwrap().to_owned();
-
-        let attached = app
-            .clone()
-            .oneshot(json_request(
-                "PUT",
-                KEY,
-                &format!("/v1/issuers/{issuer_id}/payout-addresses"),
-                &json!({"payout_address_ids": [address_id]}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(attached.status(), StatusCode::OK);
-        let attached = json_body(attached).await;
-        assert_eq!(attached["payout_addresses"][0]["address"], checksummed);
-
-        // An id that is not this account's reads as a missing address.
-        let stranger = app
-            .clone()
-            .oneshot(json_request(
-                "PUT",
-                KEY,
-                &format!("/v1/issuers/{issuer_id}/payout-addresses"),
-                &json!({"payout_address_ids": [PayoutAddressId::generate()]}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(stranger.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            json_body(stranger).await["error"]["code"],
-            "payout_address_not_found"
-        );
-
-        // A request issued under the identity keeps the link, and the link
-        // survives the identity being renamed.
-        let issued = json_body(
-            app.clone()
-                .oneshot(create_request(KEY, "issuer-link", &{
-                    let mut body = valid_body();
-                    body["issuer_id"] = json!(issuer_id);
-                    body
-                }))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(issued["issuer_id"], issuer_id);
-
-        let renamed = app
-            .clone()
-            .oneshot(json_request(
-                "PATCH",
-                KEY,
-                &format!("/v1/issuers/{issuer_id}"),
-                &json!({"name": "Acme GmbH", "contact_email": "billing@acme.example"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(json_body(renamed).await["name"], "Acme GmbH");
-        let after = json_body(
-            app.clone()
-                .oneshot(get_request(
-                    KEY,
-                    &format!("/v1/deposit-requests/{}", issued["id"].as_str().unwrap()),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(after["issuer_id"], issuer_id, "the link is unchanged");
-        assert_eq!(
-            after["issuer"]["name"], "Acme",
-            "and the document still says what it said when issued"
-        );
-
-        // An identity that history refers to cannot be deleted out from under it.
-        let refused = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/v1/issuers/{issuer_id}"))
-                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(refused.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(refused).await["error"]["code"], "issuer_in_use");
-
-        // A request is findable by the identity it was issued under, by the
-        // customer it is billed to, and by where its verification stands —
-        // three separate facts, three separate filters.
-        let listed = |query: &str| get_request(KEY, &format!("/v1/deposit-requests?{query}"));
-        for (query, expected) in [
-            (format!("issuer_id={issuer_id}"), 1),
-            (format!("issuer_id={}", IssuerId::generate()), 0),
-            ("verification=not_required".to_string(), 1),
-            ("verification=verified".to_string(), 0),
-        ] {
-            let page = json_body(app.clone().oneshot(listed(&query)).await.unwrap()).await;
-            assert_eq!(
-                page["deposit_requests"].as_array().unwrap().len(),
-                expected,
-                "{query}"
-            );
-        }
-        let refused = app
-            .clone()
-            .oneshot(listed("verification=nonsense"))
-            .await
-            .unwrap();
-        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-
-        // The listing carries each identity's addresses with it.
-        let page = json_body(
-            app.clone()
-                .oneshot(get_request(KEY, "/v1/issuers"))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(page["issuers"][0]["payout_addresses"][0]["id"], address_id);
-
-        // Deleting the wallet takes its associations with it.
-        let removed = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/v1/payout-addresses/{address_id}"))
-                    .header(header::AUTHORIZATION, format!("Bearer {KEY}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
-        let after = json_body(
-            app.clone()
-                .oneshot(get_request(KEY, &format!("/v1/issuers/{issuer_id}")))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert!(after["payout_addresses"].as_array().unwrap().is_empty());
-    }
-
-    #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
     async fn customers_are_created_listed_updated_and_scoped_to_the_account(pool: PgPool) {
         let app = app(pool.clone()).await;
         let post = |body: Value| json_request("POST", KEY, "/v1/customers", &body);
@@ -6631,12 +6162,246 @@ mod tests {
         assert_eq!(history["deliveries"][0]["id"], delivery_id);
     }
 
-    /// A request may name saved records instead of retyping them: the
-    /// issuer identity supplies the issuer party and, with a saved payout
-    /// address, the payout address; the customer supplies the payer. What is
-    /// issued is the same snapshot an inline request would have produced.
+    /// The issuer id is opaque merchant-supplied text: stored and returned
+    /// verbatim, whatever shape it takes, and filterable by exact match.
     #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
-    async fn create_takes_parties_and_payout_address_from_saved_records(pool: PgPool) {
+    async fn issuer_id_round_trips_verbatim_and_filters_exactly(pool: PgPool) {
+        let app = app(pool.clone()).await;
+
+        // Characters that need URL encoding in the query string, plus the
+        // shape a migrated pre-2.0 value has, all pass through unchanged.
+        let body = |issuer_id: &str| {
+            json!({
+                "amount": "1",
+                "issuer": {"name": "Acme"},
+                "payer": {"name": "Globex"},
+                "payout_address": "0x0000000000000000000000000000000000000002",
+                "issuer_id": issuer_id,
+                "payer_policy": {"mode": "permissionless"}
+            })
+        };
+        for (name, issuer_id) in [
+            ("opaque", "merchant-acme/invoice#42 (FY26)"),
+            ("migrated", "iss_0198f80c-1111-7dc1-a369-90556a64f700"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(create_request(KEY, name, &body(issuer_id)))
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            let issued: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{name}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            assert_eq!(issued["issuer_id"], issuer_id, "{name}");
+
+            let fetched = json_body(
+                app.clone()
+                    .oneshot(get_request(
+                        KEY,
+                        &format!("/v1/deposit-requests/{}", issued["id"].as_str().unwrap()),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(fetched["issuer_id"], issuer_id, "{name}");
+        }
+
+        // The list filter matches the stored string exactly, byte for byte,
+        // including characters needing URL encoding.
+        let quoted = "merchant-acme/invoice%2342%20(FY26)";
+        let listed = json_body(
+            app.clone()
+                .oneshot(get_request(
+                    KEY,
+                    &format!("/v1/deposit-requests?issuer_id={quoted}"),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listed["deposit_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            listed["deposit_requests"][0]["issuer_id"],
+            "merchant-acme/invoice#42 (FY26)"
+        );
+        let listed = json_body(
+            app.clone()
+                .oneshot(get_request(
+                    KEY,
+                    "/v1/deposit-requests?issuer_id=iss_0198f80c-1111-7dc1-a369-90556a64f700",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listed["deposit_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            listed["deposit_requests"][0]["issuer_id"],
+            "iss_0198f80c-1111-7dc1-a369-90556a64f700"
+        );
+        // Case differs: no match, and no normalization on the way in or out.
+        let listed = json_body(
+            app.clone()
+                .oneshot(get_request(
+                    KEY,
+                    "/v1/deposit-requests?issuer_id=MERCHANT-ACME%2Finvoice%2342%20(FY26)",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(listed["deposit_requests"].as_array().unwrap().len(), 0);
+    }
+
+    /// An issuer id scopes to the account that stored it: another account's
+    /// identical string never leaks into this one's list.
+    #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
+    async fn issuer_id_filtering_is_scoped_to_the_account(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        const OTHER: &str = "gum_live_other0123456789abcdef0123456789abcdef";
+        other_account(&pool, OTHER).await;
+
+        let body = json!({
+            "amount": "1",
+            "issuer": {"name": "Acme"},
+            "payer": {"name": "Globex"},
+            "payout_address": "0x0000000000000000000000000000000000000002",
+            "issuer_id": "shared-correlation-id",
+            "payer_policy": {"mode": "permissionless"}
+        });
+        let issued = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "mine", &body))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(issued["issuer_id"], "shared-correlation-id");
+        let foreign = json_body(
+            app.clone()
+                .oneshot(create_request(OTHER, "theirs", &body))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(foreign["issuer_id"], "shared-correlation-id");
+
+        let mine = json_body(
+            app.clone()
+                .oneshot(get_request(
+                    KEY,
+                    "/v1/deposit-requests?issuer_id=shared-correlation-id",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let ids: Vec<&str> = mine["deposit_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![issued["id"].as_str().unwrap()]);
+    }
+
+    /// Replaying under one idempotency key returns the original request, and
+    /// a differing issuer_id conflicts exactly as any other field would.
+    #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
+    async fn idempotent_replay_compares_issuer_id(pool: PgPool) {
+        let app = app(pool.clone()).await;
+        let base = json!({
+            "amount": "1",
+            "issuer": {"name": "Acme"},
+            "payer": {"name": "Globex"},
+            "payout_address": "0x0000000000000000000000000000000000000002",
+            "issuer_id": "order-42",
+            "payer_policy": {"mode": "permissionless"}
+        });
+        let first = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "replay", &base))
+                .await
+                .unwrap(),
+        )
+        .await;
+
+        let same = json_body(
+            app.clone()
+                .oneshot(create_request(KEY, "replay", &base))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(same["id"], first["id"]);
+
+        let mut changed = base.clone();
+        changed["issuer_id"] = json!("order-43");
+        let conflict = app
+            .clone()
+            .oneshot(create_request(KEY, "replay", &changed))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(conflict).await["error"]["message"],
+            "Idempotency-Key already used with different request parameters"
+        );
+    }
+
+    /// The issuer party and payout address are required inline now; without
+    /// one of them the request names the missing field.
+    #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
+    async fn inline_issuer_and_payout_address_are_required(pool: PgPool) {
+        let app = app(pool.clone()).await;
+
+        let bare = app
+            .clone()
+            .oneshot(create_request(
+                KEY,
+                "bare",
+                &json!({"amount": "1", "payer_policy": {"mode": "permissionless"}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bare.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(bare).await["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("payout_address")
+        );
+
+        let no_issuer = app
+            .clone()
+            .oneshot(create_request(
+                KEY,
+                "no-issuer",
+                &json!({"amount": "1", "payout_address": "0x0000000000000000000000000000000000000002",
+                        "payer_policy": {"mode": "permissionless"}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(no_issuer.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(no_issuer).await["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("issuer")
+        );
+    }
+
+    /// The customer snapshot works exactly as before: the saved customer is
+    /// copied into the document at issuance and the response keeps its id.
+    #[sqlx::test(migrator = "gum_ledger::MIGRATOR")]
+    async fn create_snapshots_a_named_customer(pool: PgPool) {
         let app = app(pool.clone()).await;
         let customer = json_body(
             app.clone()
@@ -6650,114 +6415,27 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        let issuer = json_body(
+        let issued = json_body(
             app.clone()
-                .oneshot(json_request(
-                    "POST",
+                .oneshot(create_request(
                     KEY,
-                    "/v1/issuers",
-                    &json!({"name": "Acme", "contact_email": "billing@acme.example", "details": "1 Main St"}),
+                    "customer",
+                    &json!({
+                        "amount": "1",
+                        "issuer": {"name": "Acme"},
+                        "payout_address": "0x0000000000000000000000000000000000000002",
+                        "customer_id": customer["id"],
+                        "payer_policy": {"mode": "permissionless"}
+                    }),
                 ))
                 .await
                 .unwrap(),
         )
         .await;
-        let issuer_id = issuer["id"].as_str().unwrap().to_owned();
-        let mut body = json!({
-            "amount": "1",
-            "issuer_id": issuer_id,
-            "customer_id": customer["id"],
-            "payer_policy": {"mode": "permissionless"}
-        });
-
-        // Without a saved payout address there is nowhere to settle.
-        let refused = app
-            .clone()
-            .oneshot(create_request(KEY, "saved-no-address", &body))
-            .await
-            .unwrap();
-        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-        assert!(
-            json_body(refused).await["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("payout_address")
-        );
-
-        let address = json_body(
-            app.clone()
-                .oneshot(json_request(
-                    "POST",
-                    KEY,
-                    "/v1/payout-addresses",
-                    &json!({"address": "0x0000000000000000000000000000000000000002", "label": "Ops"}),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        app.clone()
-            .oneshot(json_request(
-                "PUT",
-                KEY,
-                &format!("/v1/issuers/{issuer_id}/payout-addresses"),
-                &json!({"payout_address_ids": [address["id"]]}),
-            ))
-            .await
-            .unwrap();
-
-        let issued = app
-            .clone()
-            .oneshot(create_request(KEY, "saved-records", &body))
-            .await
-            .unwrap();
-        assert_eq!(issued.status(), StatusCode::CREATED);
-        let issued = json_body(issued).await;
-        assert_eq!(
-            issued["issuer"],
-            json!({"name": "Acme", "email": "billing@acme.example", "details": "1 Main St"})
-        );
+        assert_eq!(issued["customer_id"], customer["id"]);
         assert_eq!(
             issued["payer"],
             json!({"name": "Globex", "email": "ap@globex.example", "details": "Net 30"})
-        );
-        assert_eq!(
-            issued["payout_address"],
-            "0x0000000000000000000000000000000000000002"
-        );
-        assert_eq!(issued["issuer_id"], issuer_id);
-        assert_eq!(issued["customer_id"], customer["id"]);
-
-        // An inline party still wins over the saved record it sits beside.
-        body["payer"] = json!({"name": "Globex Holdings"});
-        let inline = json_body(
-            app.clone()
-                .oneshot(create_request(KEY, "saved-records-inline", &body))
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(inline["payer"]["name"], "Globex Holdings");
-        assert!(inline["payer"].get("email").is_none());
-
-        // With neither an inline party nor a record to take it from, the
-        // request says which field is missing.
-        let bare = app
-            .clone()
-            .oneshot(create_request(
-                KEY,
-                "saved-records-bare",
-                &json!({"amount": "1", "payer_policy": {"mode": "permissionless"},
-                        "payout_address": "0x0000000000000000000000000000000000000002"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(bare.status(), StatusCode::BAD_REQUEST);
-        assert!(
-            json_body(bare).await["error"]["message"]
-                .as_str()
-                .unwrap()
-                .starts_with("issuer is required")
         );
     }
 

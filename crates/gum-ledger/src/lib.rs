@@ -5,9 +5,7 @@ mod cursor;
 mod customers;
 mod execution_status;
 mod invoices;
-mod issuers;
 mod notifications;
-mod onboarding;
 mod proofs;
 mod relay_intents;
 mod sweeps;
@@ -33,14 +31,9 @@ pub use invoices::{
     InvoiceRepository, IssuanceRequest, PaymentObservation, RangeApplied, ReleasePaymentError,
     WatchFingerprint, same_issuance,
 };
-pub use issuers::{
-    CreateIssuerInput, CreatePayoutAddressInput, DbIssuer, DbIssuerPayoutAddress, DbPayoutAddress,
-    ISSUER_NAME_UNIQUE, IssuerRepository, StartIssuerEmailError, is_duplicate_issuer_name,
-};
 pub use notifications::{
     NotificationEvent, NotificationRecipient, NotificationRepository, PAYER_DEPOSIT_REQUEST_ISSUED,
 };
-pub use onboarding::{OnboardingClaim, OnboardingDemoPaymentRepository};
 pub use proofs::{DbInvoiceSettlement, DbSettlementTransfer, ProofRepository};
 pub use relay_intents::{
     DbRelayIntent, FillResolution, MarkSent, NewRelayIntent, RelayIntentRepository,

@@ -17,7 +17,7 @@ signing, real S3 scanning, and real email.
 | Contracts | bootstrapped on Anvil each run | staging's own `PaymentFactory` generation | production's generation |
 | Web app | `just web` on port 3002 | `just web-staging` on port 3002 | Vercel, `gum.money` |
 | Merchant sign-in | development Privy app | development Privy app | production Privy app |
-| Payer and issuer codes | the local identity provider, fixed code | production Auth0 tenant, real mail | production Auth0 tenant |
+| Payer codes | the local identity provider, fixed code | production Auth0 tenant, real mail | production Auth0 tenant |
 | Attachments | MinIO, verdict tagged by hand | S3 and GuardDuty | S3 and GuardDuty |
 | Merchant email | not sent | SES from `alerts@staging.gum.money` | SES from `alerts@gum.money` |
 | Keys | Anvil accounts | staging's own KMS keys | production's KMS keys |
@@ -96,7 +96,7 @@ your machine. Use a request-capture service or a tunnel for a local
 receiver.
 
 Operator commands (`docs/runbooks/`) work against staging with
-`AWS_REGION=eu-north-1` and the cluster name `payday-staging`; every
+`AWS_REGION=eu-north-1` and the cluster name `gum-staging`; every
 Terraform command needs `-var-file=environments/staging.tfvars` and an init
 against `environments/staging.backend.hcl`.
 
@@ -152,7 +152,7 @@ afterwards. To force a reset by hand:
 terraform -chdir=infra apply -var-file=environments/staging.tfvars \
   -var image_tag=git-<sha> -replace=aws_db_instance.this \
   -target=aws_ecs_task_definition.migrate
-scripts/run-migrate-task.sh payday-staging
+scripts/run-migrate-task.sh gum-staging
 terraform -chdir=infra apply -var-file=environments/staging.tfvars \
   -var image_tag=git-<sha>
 ```
@@ -200,7 +200,7 @@ Gum AWS account.
      -var "image_tag=git-$(git rev-parse HEAD)" \
      -target=aws_ecs_task_definition.migrate -out=migrate.tfplan
    terraform -chdir=infra apply migrate.tfplan
-   scripts/run-migrate-task.sh payday-staging
+   scripts/run-migrate-task.sh gum-staging
    terraform -chdir=infra plan -var-file=environments/staging.tfvars \
      -var "image_tag=git-$(git rev-parse HEAD)" -out=staging.tfplan
    terraform -chdir=infra apply staging.tfplan
@@ -234,7 +234,7 @@ Gum AWS account.
    run the workflow by hand once from the Actions tab to confirm.
 8. **Verify.** `just web-staging`, sign in, mint a key, and run
    `just live-smoke`. Confirm the SNS alarm subscription mail for
-   `payday-staging`.
+   `gum-staging`.
 
 ## Cost and guardrails
 

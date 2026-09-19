@@ -31,10 +31,9 @@ pub mod rpc;
 
 pub use bus::{
     AbandonReason, BusMessage, CHAIN_CONTROL_TOPIC, ChainControl, EXECUTION_COMMANDS_TOPIC,
-    EXECUTION_EVENTS_TOPIC, ExecutionCommand, ExecutionEvent, OnboardingPaymentCommand,
-    SettlementEvidence, StepPrecondition, StepResult, SweepBatchCommand, SweepFailureCause,
-    SweepItem, SweepItemOutcome, SweepItemResult, SweepItemStatus, WithdrawalStepCommand,
-    WithdrawalStepKind,
+    EXECUTION_EVENTS_TOPIC, ExecutionCommand, ExecutionEvent, SettlementEvidence, StepPrecondition,
+    StepResult, SweepBatchCommand, SweepFailureCause, SweepItem, SweepItemOutcome, SweepItemResult,
+    SweepItemStatus, WithdrawalStepCommand, WithdrawalStepKind,
 };
 pub use correlation::{CAUSATION_HEADER, CORRELATION_HEADER, CorrelationId};
 pub use rpc::{
