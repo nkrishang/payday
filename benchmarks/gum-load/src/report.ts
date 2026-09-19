@@ -52,6 +52,9 @@ export interface RunSummary {
     paymentToPayout: ReturnType<typeof distribution>;
     observedFinalized: ReturnType<typeof distribution>;
     merchantSeen: ReturnType<typeof distribution>;
+    /** Payment finalized on-chain → merchant API sees settled: the system's
+     * own latency, chain inclusion and finality time excluded. */
+    attributable: ReturnType<typeof distribution>;
     exploratoryP99: boolean;
   };
   capacity60?: { cohort: number; settledApi: number; settledWebhook: number; settledChain: number; pass: boolean };
@@ -87,14 +90,25 @@ export function buildSummary(state: RunState, meta: ReportMeta): RunSummary {
     return [(settledWall - paymentWall) / 1000];
   });
   void merchant;
+  // The system's own latency, measured the way the operator asked for: from
+  // the moment the payment is finalized on-chain — chain time excluded — to
+  // the merchant API reporting the deposit settled. Chain inclusion and
+  // finality are the blockchain's schedule, not ours; detection, sweeping
+  // and settlement reporting are the system under test.
+  const attributable = ops.flatMap((op) => {
+    const seconds = wallSeconds(op, "payment_finality_seen", "settled_api_seen");
+    return seconds === undefined ? [] : [seconds];
+  });
 
-  const perOp = ops.map((op) => ({
+    const perOp = ops.map((op) => ({
     op: op.op,
     deposit_id: op.depositId,
     chain: op.chainId,
     profile: op.warmup ? "warmup" : meta.experiment,
     payment_to_payout_s: secondsBetween(op, "payment_inclusion", "payout_inclusion"),
     detection_to_final_payout_s: secondsBetween(op, "payment_first_seen", "payout_finality_seen"),
+    finality_to_settled_s: wallSeconds(op, "payment_finality_seen", "settled_api_seen"),
+    finality_to_credited_s: wallSeconds(op, "payment_finality_seen", "credited_api_seen"),
     payment_to_settled_api_s: wallSeconds(op, "payment_inclusion", "settled_api_seen"),
     create_to_settled_api_s: wallSeconds(op, "create_start", "settled_api_seen"),
     outcome: op.phase,
@@ -126,6 +140,7 @@ export function buildSummary(state: RunState, meta: ReportMeta): RunSummary {
             paymentToPayout: distribution(e2e),
             observedFinalized: distribution(observed),
             merchantSeen: distribution(merchant2),
+            attributable: distribution(attributable),
             exploratoryP99: e2e.length < 1000,
           },
         }
@@ -163,7 +178,8 @@ function renderMarkdown(summary: RunSummary, state: RunState, meta: ReportMeta):
     lines.push("| metric | n | p50 | p95 | p99 |", "|---|---|---|---|---|");
     lines.push(`| payment landed → payout landed | ${l.paymentToPayout.count} | ${fmtSeconds(l.paymentToPayout.p50)} | ${fmtSeconds(l.paymentToPayout.p95)} | ${fmtSeconds(l.paymentToPayout.p99)}${l.exploratoryP99 ? " (exploratory, n<1000)" : ""} |`);
     lines.push(`| observed payment → observed finalized payout | ${l.observedFinalized.count} | ${fmtSeconds(l.observedFinalized.p50)} | ${fmtSeconds(l.observedFinalized.p95)} | ${fmtSeconds(l.observedFinalized.p99)} |`);
-    lines.push(`| payment landed → merchant API sees settled | ${l.merchantSeen.count} | ${fmtSeconds(l.merchantSeen.p50)} | ${fmtSeconds(l.merchantSeen.p95)} | ${fmtSeconds(l.merchantSeen.p99)} |`, "");
+    lines.push(`| payment landed → merchant API sees settled | ${l.merchantSeen.count} | ${fmtSeconds(l.merchantSeen.p50)} | ${fmtSeconds(l.merchantSeen.p95)} | ${fmtSeconds(l.merchantSeen.p99)} |`);
+    lines.push(`| payment finalized → merchant API sees settled (system latency, chain time excluded) | ${l.attributable.count} | ${fmtSeconds(l.attributable.p50)} | ${fmtSeconds(l.attributable.p95)} | ${fmtSeconds(l.attributable.p99)} |`, "");
   }
   if (summary.capacity60) {
     lines.push("## Capacity60", "");
