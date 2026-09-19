@@ -23,7 +23,6 @@ curl -fsS "$API/v1/deposit-requests" \\
     "payer": { "name": "Customer Inc" },
     "heading": "March retainer",
     "reference": "INV-1042",
-    "payer_policy": { "mode": "permissionless" },
     "expires_in": 3600
   }' | jq`;
 
@@ -39,7 +38,6 @@ const request = await gum.depositRequests.create(
     payer: { name: "Customer Inc" },
     heading: "March retainer",
     reference: "INV-1042",
-    payer_policy: { mode: "permissionless" },
     expires_in: 3600,
   },
   "order-1042", // idempotency key: your own id for this request

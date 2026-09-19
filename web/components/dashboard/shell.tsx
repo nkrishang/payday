@@ -14,9 +14,9 @@ import { HOME_PATH, MerchantGate, useOptionalMerchant } from "./session";
  *
  * `gum` carries the landing page's palette and type (globals.css), and the
  * header is the site's one header (components/site-header.tsx) with "Sign
- * out" appended. There are no section tabs — everything a merchant does day to day is on `/dashboard` itself, and
- * the pages that remain are details of one record, which the back link and the
- * wordmark both return from.
+ * out" appended. There are no section tabs — everything a merchant does day
+ * to day is on `/dashboard` itself, and the pages that remain are details of
+ * one record, which the back link and the wordmark both return from.
  *
  * The header stands outside the session: it renders while Privy is still
  * restoring the session too, so a reload lands on the skeleton with its

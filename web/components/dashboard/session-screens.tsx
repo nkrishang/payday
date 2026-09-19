@@ -75,11 +75,9 @@ export function DashboardChecking() {
           <Bar className="mt-3 h-3.5 w-[min(460px,90%)]" />
         </div>
         <div className="mt-12 grid gap-14">
-          <SectionSkeleton heading="w-[124px]" card="h-48" />
-          <SectionSkeleton heading="w-[196px]" card="h-36" />
-          <SectionSkeleton heading="w-[136px]" card="h-36" />
           <SectionSkeleton heading="w-[110px]" card="h-40" />
-          <SectionSkeleton heading="w-[104px]" card="h-40" />
+          <SectionSkeleton heading="w-[124px]" card="h-48" />
+          <SectionSkeleton heading="w-[136px]" card="h-40" />
         </div>
       </main>
     </div>

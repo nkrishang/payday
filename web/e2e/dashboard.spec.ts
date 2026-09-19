@@ -10,11 +10,7 @@ import { expect, test, type Page } from "@playwright/test";
  * and it is covered on its own in signup.spec.ts.
  */
 
-const STUB = "http://127.0.0.1:4010";
 const OTP = "123456";
-const PDF = Buffer.from(
-  "%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n",
-);
 
 async function signIn(page: Page, email = "merchant@example.com") {
   await page.goto("/");
@@ -81,155 +77,6 @@ test("the deposit list shows verification separately from the deposit and flags 
   await page.getByRole("option", { name: "Pending" }).click();
   await expect(page.getByRole("row").filter({ hasText: "Consulting — August" })).toHaveCount(0);
   await expect(page.getByRole("row").filter({ hasText: "Retainer — September" })).toHaveCount(1);
-});
-
-test("a merchant can create a customer, upload a PDF, issue a request, and open it", async ({
-  page,
-}) => {
-  await signIn(page);
-
-  // An identity first: nothing is issued without one, and the composer is the
-  // only way in — there is no separate deposit request form. Where it settles needs
-  // no setting up: the account's own wallet is the default.
-  await page.getByRole("button", { name: "New deposit request" }).click();
-  await page.getByLabel("Issued by").fill("Acme Corp");
-  await page.getByLabel("Contact address").fill("billing@acme.example");
-  await page.getByRole("button", { name: "Send code" }).click();
-  await page.getByLabel("One-time code").fill(OTP);
-  await page.getByRole("button", { name: "Confirm code" }).click();
-  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
-  await page.getByRole("button", { name: "Cancel" }).click();
-
-  // Customer, from the dashboard's own customers section.
-  await page.getByRole("button", { name: "New customer" }).click();
-  const customerName = `Initrode ${Date.now()}`;
-  await page.getByLabel("Name").fill(customerName);
-  await page.getByLabel("Email").fill("ap@initrode.example");
-  await page.getByLabel("Details").fill("Vendor #4471");
-  await page.getByRole("button", { name: "Create customer" }).click();
-  await expect(page).toHaveURL(/\/dashboard\/customers\/cus_[0-9a-f-]{36}$/);
-  await expect(page.getByRole("heading", { name: customerName })).toBeVisible();
-
-  // Straight into a request for that customer, which opens on them.
-  await page.getByRole("link", { name: "New deposit request for this customer" }).click();
-  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
-
-  // Amount, the network pinned to Base, and a deadline of the merchant's own
-  // choosing rather than a preset.
-  await page.getByLabel("Amount").fill("120.50");
-  const networks = page.getByRole("radiogroup", { name: "Network" });
-  await expect(networks.getByRole("radio", { name: "Payer's choice" })).toBeChecked();
-  await networks.getByRole("radio", { name: "Base" }).check();
-  await page.getByRole("radio", { name: "Custom" }).click();
-  const deadline = new Date(Date.now() + 3 * 24 * 3600_000);
-  const pad = (value: number) => String(value).padStart(2, "0");
-  const chosen =
-    `${deadline.getFullYear()}-${pad(deadline.getMonth() + 1)}-${pad(deadline.getDate())}` +
-    `T${pad(deadline.getHours())}:${pad(deadline.getMinutes())}`;
-  await page.getByLabel("Date and time").fill(chosen);
-  await page.getByRole("button", { name: "Continue" }).click();
-
-  // Billing: the customer came through the link, and the PDF is asked for here.
-  await expect(page.getByLabel("Payer")).toHaveValue(customerName);
-  await expect(page.getByLabel("Email")).toHaveValue("ap@initrode.example");
-  await page.getByLabel("Reason").fill("Design retainer");
-  await page.getByLabel("Reference").fill("INV-2001");
-  await page.getByLabel("Notes").fill("Net 15.");
-
-  // Attachment: upload, scan, ready.
-  const uploads = page.waitForRequest(
-    (request) => request.method() === "PUT" && request.url().includes("/__upload/"),
-  );
-  await page.getByLabel(/Attachment \(PDF/).setInputFiles({
-    name: "retainer.pdf",
-    mimeType: "application/pdf",
-    buffer: PDF,
-  });
-  const put = await uploads;
-  expect(put.headers()["content-type"]).toBe("application/pdf");
-  expect(put.headers()["x-amz-tagging"]).toBe("gum-upload=pending");
-  expect(put.headers()["authorization"]).toBeUndefined();
-  await expect(page.getByRole("status")).toContainText(/Scanning retainer\.pdf/);
-  await expect(page.getByText(/Ready · /)).toBeVisible({ timeout: 15_000 });
-  await page.getByRole("button", { name: "Continue" }).click();
-
-  // The email add-on is one of two independent toggles; the expected mailbox
-  // arrives filled in.
-  await page.getByRole("checkbox", { name: "Verify payer email" }).check();
-  await expect(page.getByLabel("Expected payer email")).toHaveValue("ap@initrode.example");
-  await page.getByLabel("Expected payer email").fill("peter@initrode.example");
-  await page.getByRole("button", { name: "Continue" }).click();
-
-  // The review carries the whole request, attachment included.
-  const summary = page.getByLabel("Request summary");
-  await expect(summary).toContainText("retainer.pdf");
-  await expect(summary).toContainText("Verified email");
-  await expect(summary).toContainText("Base");
-
-  const created = page.waitForRequest(
-    (request) => request.method() === "POST" && request.url().endsWith("/v1/deposit-requests"),
-  );
-  await page.getByRole("button", { name: "Issue deposit request" }).click();
-  const body = (await created).postDataJSON();
-  // The moment is sent as a moment; a duration would re-anchor it to arrival.
-  expect(body.expires_at).toBe(new Date(chosen).toISOString());
-  expect(body).not.toHaveProperty("expires_in");
-  expect(body.notes).toBe("Net 15.");
-  expect(body.attachment_id).toBeTruthy();
-  // The pinned network travels as the API's decimal chain id.
-  expect(body.chain_id).toBe("8453");
-  // Settles to the account's own wallet, never typed by anyone.
-  const wallet = await page.evaluate(
-    () => JSON.parse(sessionStorage.getItem("gum.privy-stub.session") ?? "{}").wallet,
-  );
-  expect(body.payout_address).toBe(wallet);
-
-  await expect(page.getByRole("heading", { name: "Deposit request issued." })).toBeVisible();
-  // Tracking it lands back on the list with that request's row already open;
-  // there is no page of its own to navigate to.
-  await page.getByRole("button", { name: "Track this request" }).click();
-  await expect(page).toHaveURL(/\/dashboard(\?.*)?$/);
-
-  // The open row carries the whole request: deposit, verification, and files.
-  await expect(page.getByRole("button", { name: /Design retainer/, expanded: true })).toBeVisible();
-  // The status is in the row twice — once for phones, once for wider screens —
-  // and only one of them is shown, so the assertion is on the shown one.
-  await expect(page.getByText("Awaiting deposit").filter({ visible: true }).first()).toBeVisible();
-  await expect(page.getByRole("progressbar", { name: "Received" })).toBeVisible();
-  await expect(page.getByText("INV-2001").first()).toBeVisible();
-  await expect(page.getByText("Net 15.")).toBeVisible();
-  await expect(page.getByText("retainer.pdf")).toBeVisible();
-  await expect(page.getByText("Verified email").first()).toBeVisible();
-  await expect(page.getByText("peter@initrode.example")).toBeVisible();
-  await expect(page.getByText("Base · USDC")).toBeVisible();
-  await expect(page.getByText("Pending").first()).toBeVisible();
-  // No attempt yet, so nothing is broken out under the verdict.
-  await expect(page.getByLabel("Verification activity")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Proof of Payment" })).toBeDisabled();
-  await expect(page.getByText(/generated once the request settles/)).toBeVisible();
-  await expect(page.getByText("Recovered funds")).toHaveCount(0);
-
-  // The signed download URL is fetched on demand, not embedded.
-  await page.addInitScript(() => {
-    (window as unknown as { __opened: string[] }).__opened = [];
-    window.open = (url) => {
-      (window as unknown as { __opened: string[] }).__opened.push(String(url));
-      return window;
-    };
-  });
-  await page.reload();
-  await page.getByRole("button", { name: /Design retainer/ }).click();
-  await page.getByRole("button", { name: "Download attachment" }).click();
-  await expect
-    .poll(() => page.evaluate(() => (window as unknown as { __opened: string[] }).__opened))
-    .toEqual([expect.stringContaining(`${STUB}/__download/`)]);
-
-  // And its summary row still carries what the list is scanned for.
-  // The summary row, not the detail row under it that repeats the title.
-  const row = page.getByRole("row").filter({ hasText: "Design retainer" }).first();
-  await expect(row).toContainText(customerName);
-  await expect(row).toContainText("Verified email");
-  await expect(row.getByLabel("Has attachment")).toBeVisible();
 });
 
 test("a settled invoice offers its PDF, its Proof of Payment, and its recovered funds", async ({
@@ -438,27 +285,8 @@ test("a withdrawal can be cancelled before it is signed", async ({ page }) => {
   await expect(history).toContainText("Cancelled");
 });
 
-test("a USDT request names its network, and a USDT withdrawal moves that network's balance alone", async ({
-  page,
-}) => {
+test("a USDT withdrawal moves that network's balance alone", async ({ page }) => {
   await signIn(page, "usdt@example.com");
-
-  // The composer: USDT is a currency choice, and with it the network is not
-  // the payer's to choose — Monad, the one network serving it, is set.
-  await page.getByRole("button", { name: "New deposit request" }).click();
-  await page.getByLabel("Issued by").fill("Acme Corp");
-  await page.getByLabel("Contact address").fill("billing@acme.example");
-  await page.getByRole("button", { name: "Send code" }).click();
-  await page.getByLabel("One-time code").fill(OTP);
-  await page.getByRole("button", { name: "Confirm code" }).click();
-  await expect(page.getByRole("heading", { name: "New deposit request." })).toBeVisible();
-  await page.getByLabel("Amount").fill("40");
-  await page.getByRole("radiogroup", { name: "Currency" }).getByRole("radio", { name: /USDT/ }).check();
-  const networks = page.getByRole("radiogroup", { name: "Network" });
-  await expect(networks.getByRole("radio", { name: "Payer's choice" })).toHaveCount(0);
-  await expect(networks.getByRole("radio", { name: /Monad/ })).toBeChecked();
-  await expect(networks.getByRole("radio", { name: /Base/ })).toHaveCount(0);
-  await page.getByRole("button", { name: "Cancel" }).click();
 
   // The account section shows each network's balance in every stablecoin it
   // serves: Monad holds USDT0 next to its USDC.

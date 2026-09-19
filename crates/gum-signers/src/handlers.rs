@@ -23,23 +23,14 @@ pub struct CommandHandler {
     chains: Arc<HashSet<u64>>,
     wakers: Arc<HashMap<u64, Arc<Notify>>>,
     publisher: Publisher,
-    onboarding_payers: Arc<HashMap<u64, alloy_primitives::Address>>,
 }
 
 impl CommandHandler {
     pub fn new(wakers: Arc<HashMap<u64, Arc<Notify>>>) -> Self {
-        Self::new_with_onboarding(wakers, HashMap::new())
-    }
-
-    pub fn new_with_onboarding(
-        wakers: Arc<HashMap<u64, Arc<Notify>>>,
-        onboarding_payers: HashMap<u64, alloy_primitives::Address>,
-    ) -> Self {
         Self {
             chains: Arc::new(wakers.keys().copied().collect()),
             wakers,
             publisher: Publisher::new("gum-signers"),
-            onboarding_payers: Arc::new(onboarding_payers),
         }
     }
 }
@@ -55,9 +46,6 @@ impl Handler<ExecutionCommand> for CommandHandler {
         let chain_id = command.chain_id();
         let rejection_reason = if !self.chains.contains(&chain_id) {
             Some(format!("chain {chain_id} is not served by this executor"))
-        } else if let ExecutionCommand::OnboardingPayment(command) = command {
-            (self.onboarding_payers.get(&chain_id) != Some(&command.payer))
-                .then(|| "onboarding command does not require the configured payer".to_owned())
         } else {
             None
         };

@@ -10,7 +10,8 @@ or the Privy identity token a signed-in dashboard holds — and creates
 additionally require `Idempotency-Key`. A replay returns
 `Idempotency-Replayed: true`.
 
-Create requests contain `amount`, `payout_address`, an `issuer` and a `payer`
+Create requests contain `amount`, a required `payout_address`, a required
+`issuer` party and a `payer`
 party (`name`, optional `email` and `details`), and an optional `verification`
 object of up to three independent add-ons: `email` (names the expected email,
 verified by the same OTP flow as before), `merchant_auth` (names the user your
@@ -22,12 +23,12 @@ attestation from the wallet they will pay from). Omitted or `{}` means no
 add-ons: the request is fully permissionless. `payer_policy` is rejected as an
 unknown field. Optional
 fields are `currency`, `chain_id`, `notes`, `heading`, `reference`, a small JSON-object `metadata`, a
-`customer_id`, an `issuer_id`, and one finalized `attachment_id` for a scanned
-PDF. A request that names a saved customer may leave `payer` out, and one
-that names a saved issuer identity may leave `issuer` and `payout_address`
-out: the saved record is snapshotted in their place, and the smallest valid
-request is `amount`, `issuer_id`, and `customer_id`. Ids are
-prefixed (`dr_`, `cus_`, `iss_`, `att_`; see the reference's Conventions) and
+`customer_id`, an opaque `issuer_id` of your own choosing (1–255 bytes, stored
+verbatim, filterable by exact match; every byte but NUL passes through), and one finalized `attachment_id` for a
+scanned PDF. A request that names a saved customer may leave `payer` out: the
+saved record is snapshotted in its place, and the smallest valid request is
+`amount`, `payout_address`, `issuer`, and `payer`. Ids are
+prefixed (`dr_`, `cus_`, `att_`; see the reference's Conventions) and
 are passed back exactly as received. The amount
 is used directly; there are no line items. Exactly `amount` settles to
 `payout_address`. The deposit address exists as soon as the request's network

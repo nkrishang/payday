@@ -25,8 +25,7 @@ export function statusTone(status: DepositRequestStatus): CheckoutTone {
  * Merchant-facing words for a request's verification add-ons, read from the
  * `verification` object every response carries. `merchant_auth` appears only
  * when a request was composed through the API: it needs the merchant's
- * application to sign the payer in and hand over the client secret, which a
- * request composed by hand in the dashboard has no way to do.
+ * application to sign the payer in and hand over the client secret.
  */
 export function verificationLabel(verification: PayerVerification): string {
   const parts: string[] = [];

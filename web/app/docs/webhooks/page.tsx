@@ -50,9 +50,8 @@ Gum-Signature: v1,t=1756728000,sha256=6f1a…9c0e
       "reference": "INV-1042",
       "metadata": { "po": "PO-77" },
       "customer_id": null,
-      "issuer_id": "iss_0198f80c-1111-7dc1-a369-90556a64f700",
-      "payer_policy_mode": "merchant_session",
-      "payer_reference": "user_123",
+      "issuer_id": "issuer-acme-eu",
+      "verification": {"email": null, "merchant_auth": {"payer_reference": "user_123"}, "wallet_attestation": false},
       "verification_completed_at": "2026-09-01T11:58:00Z",
       "likely_unsolicited_at": null,
       "payer_wallet": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
@@ -182,8 +181,8 @@ export default function WebhooksPage() {
               <Pill tone="green">verification.approved</Pill>
             </td>
             <td>
-              The payer policy was satisfied: a mailbox proven, or a merchant-session secret
-              exchanged.
+              The request&apos;s identity add-ons were satisfied: a mailbox proven, or a
+              merchant-auth secret exchanged. Requests with neither never raise it.
             </td>
           </tr>
           <tr>
@@ -265,8 +264,9 @@ export default function WebhooksPage() {
       <CodeBlock code={DELIVERY} lang="http" title="A delivery" />
       <ul>
         <li>
-          <code>payer_reference</code> is your own id for the payer on a merchant-session request
-          and <code>null</code> otherwise, so a settled handler credits the right ledger directly.
+          <code>verification.merchant_auth.payer_reference</code> is your own id for the payer on a
+          merchant-auth request and <code>null</code> otherwise, so a settled handler credits the
+          right ledger directly.
         </li>
         <li>
           <code>payer_wallet</code>, <code>address</code>, and <code>wallet_bound_at</code> are{" "}

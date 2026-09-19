@@ -26,7 +26,6 @@ const request = await gum.depositRequests.create(
     payer: { name: "Customer Inc", details: "12 Main St, Springfield" },
     heading: "March retainer",
     reference: "INV-1042",
-    payer_policy: { mode: "permissionless" },
     expires_in: 3600,
   },
   crypto.randomUUID(), // the idempotency key is required
@@ -119,20 +118,6 @@ export default function SdkPage() {
             <td>customers</td>
             <td>
               <code>create</code>, <code>get</code>, <code>list</code>, <code>update</code>
-            </td>
-          </tr>
-          <tr>
-            <td>issuers</td>
-            <td>
-              <code>create</code>, <code>get</code>, <code>list</code>, <code>update</code>,{" "}
-              <code>remove</code>, <code>startEmailVerification</code>,{" "}
-              <code>confirmEmailVerification</code>, <code>setPayoutAddresses</code>
-            </td>
-          </tr>
-          <tr>
-            <td>payoutAddresses</td>
-            <td>
-              <code>create</code>, <code>list</code>, <code>remove</code>
             </td>
           </tr>
           <tr>

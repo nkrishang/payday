@@ -138,18 +138,15 @@ struct CreateDepositRequest {
     /// denominated in. `USDT` requires `chain_id`: it settles on the pinned
     /// chain and does not bridge.
     currency: Option<String>,
-    /// Where exactly `amount` settles. May be left out when `issuer_id`
-    /// names an identity with a saved payout address; its first one is used.
-    payout_address: Option<String>,
+    /// Where exactly `amount` settles, EIP-55 or lowercase hex. Required.
+    payout_address: String,
     /// Pin the network the payer must pay on: one of the deployment's chain
     /// ids, as a decimal string. Left out, the payer chooses among all of
     /// them when they sign. A chain this deployment does not serve is
     /// `422 unsupported_chain`.
     chain_id: Option<String>,
-    /// The issuing party as the document will carry it. May be left out
-    /// when `issuer_id` is given: the identity's name, contact address, and
-    /// details are snapshotted in its place. An inline party always wins.
-    issuer: Option<Party>,
+    /// The issuing party as the document will carry it. Required.
+    issuer: Party,
     /// The paying party. May be left out when `customer_id` is given: the
     /// customer is snapshotted in its place. An inline party always wins.
     payer: Option<Party>,
@@ -158,10 +155,9 @@ struct CreateDepositRequest {
     verification: Option<PayerVerification>,
     /// A `cus_` id of one of your customers.
     customer_id: Option<String>,
-    /// The `iss_` id of the saved issuer identity this is issued under.
-    /// `issuer` above is still the snapshot the document carries; this
-    /// records which identity it came from and survives that identity being
-    /// renamed.
+    /// An opaque, merchant-supplied correlation id for this request, stored
+    /// and returned verbatim: 1 to 255 bytes of UTF-8 when present, never
+    /// parsed or normalized. Gum attaches no meaning to it.
     issuer_id: Option<String>,
     /// At most 4000 bytes.
     notes: Option<String>,
@@ -565,87 +561,6 @@ struct CustomerDetail {
     stats: CustomerStats,
 }
 #[derive(Deserialize, ToSchema)]
-struct IssuerRequest {
-    /// 1–255 bytes, and unique among your identities: case and surrounding
-    /// space are not a difference.
-    name: String,
-    /// The mailbox payers are told to write to. 3–254 bytes, lowercased on
-    /// write. Changing it clears the verification.
-    contact_email: String,
-    /// At most 4000 bytes.
-    details: Option<String>,
-}
-/// A partial update: a field left out keeps its value; `details` sent as
-/// `null` is cleared. A changed `contact_email` clears the verification, so
-/// a rename alone never touches a proven mailbox.
-#[derive(Deserialize, ToSchema)]
-#[schema(example = json!({"name":"Acme Inc."}))]
-struct UpdateIssuerRequest {
-    /// 1–255 bytes, unique among your identities.
-    name: Option<String>,
-    /// 3–254 bytes, lowercased on write.
-    contact_email: Option<String>,
-    /// At most 4000 bytes, or `null` to clear.
-    #[schema(nullable)]
-    details: Option<String>,
-}
-#[derive(Deserialize, ToSchema)]
-struct ConfirmIssuerEmail {
-    /// The emailed one-time code.
-    otp: String,
-}
-#[derive(Deserialize, ToSchema)]
-struct SetIssuerPayoutAddresses {
-    /// Replaces the whole set; at most 25, all of them yours.
-    payout_address_ids: Vec<String>,
-}
-#[derive(Deserialize, ToSchema)]
-struct PayoutAddressRequest {
-    /// 20-byte hex address, stored EIP-55 checksummed. Repeating one you
-    /// already saved returns the row you have.
-    address: String,
-    /// At most 20 characters, starting on a letter or digit, from letters,
-    /// digits, spaces, and `. _ ' & ( ) -`.
-    label: Option<String>,
-}
-#[derive(Serialize, ToSchema)]
-struct PayoutAddress {
-    id: String,
-    /// EIP-55 checksummed, ready to send back as `payout_address`.
-    address: String,
-    label: Option<String>,
-    created_at: String,
-}
-#[derive(Serialize, ToSchema)]
-struct PayoutAddressList {
-    payout_addresses: Vec<PayoutAddress>,
-}
-#[derive(Serialize, ToSchema)]
-struct Issuer {
-    id: String,
-    name: String,
-    contact_email: String,
-    details: Option<String>,
-    /// Whether the contact mailbox has been proven with an emailed code.
-    email_verified: bool,
-    email_verified_at: Option<String>,
-    /// The addresses this identity may settle to, in association order.
-    payout_addresses: Vec<PayoutAddress>,
-    created_at: String,
-    updated_at: String,
-}
-#[derive(Serialize, ToSchema)]
-struct IssuerPage {
-    issuers: Vec<Issuer>,
-    next_cursor: Option<String>,
-}
-#[derive(Serialize, ToSchema)]
-struct StartIssuerEmail {
-    /// Where the code went; the address is never taken from the request.
-    contact_email: String,
-    resend_available_at: String,
-}
-#[derive(Deserialize, ToSchema)]
 struct AttachmentRequest {
     /// 1–255 bytes, kept verbatim for display.
     filename: String,
@@ -901,29 +816,6 @@ fn issue_key() {}
 #[utoipa::path(delete, path="/v1/account/api-key", operation_id="revokeApiKey", tag="account", request_body=ApiKeyGeneration, responses((status=204,description="Current and grace-period keys revoked"),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=409,description="api_key_generation_conflict",body=ErrorResponse)), security(("dashboardSession"=[])))]
 fn revoke_key() {}
 
-#[utoipa::path(post, path="/v1/issuers", operation_id="createIssuer", tag="issuers", request_body=IssuerRequest, responses((status=201,description="Created unverified; send a code to prove the contact address",body=Issuer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=409,description="issuer_name_taken",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn create_issuer() {}
-#[utoipa::path(get, path="/v1/issuers", operation_id="listIssuers", tag="issuers", params(("starting_after"=Option<String>, Query, description="Issuer id returned as next_cursor"),("limit"=Option<u32>, Query, minimum=1, maximum=100)), responses((status=200,body=IssuerPage),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn list_issuers() {}
-#[utoipa::path(get, path="/v1/issuers/{id}", operation_id="getIssuer", tag="issuers", params(("id"=String, Path)), responses((status=200,body=Issuer),(status=401,body=ErrorResponse),(status=404,description="issuer_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn get_issuer() {}
-#[utoipa::path(patch, path="/v1/issuers/{id}", operation_id="updateIssuer", tag="issuers", params(("id"=String, Path)), request_body(content=UpdateIssuerRequest, description="Partial: a field left out keeps its value; details sent as null is cleared; a different contact_email clears the verification"), responses((status=200,body=Issuer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="issuer_name_taken",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn update_issuer() {}
-#[utoipa::path(delete, path="/v1/issuers/{id}", operation_id="deleteIssuer", tag="issuers", params(("id"=String, Path)), responses((status=204,description="Deleted, with its payout-address associations"),(status=409,description="issuer_in_use: requests were issued under it",body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn delete_issuer() {}
-#[utoipa::path(post, path="/v1/issuers/{id}/verify/email/start", operation_id="startIssuerEmailVerification", tag="issuers", params(("id"=String, Path)), responses((status=202,description="A code was emailed to the stored contact address",body=StartIssuerEmail),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="issuer_email_already_verified",body=ErrorResponse),(status=429,description="otp_resend_cooldown: one code per identity per minute",body=ErrorResponse),(status=503,description="verification_unavailable",body=ErrorResponse)), security(("apiKey"=[])))]
-fn start_issuer_email() {}
-#[utoipa::path(post, path="/v1/issuers/{id}/verify/email/confirm", operation_id="confirmIssuerEmailVerification", tag="issuers", params(("id"=String, Path)), request_body=ConfirmIssuerEmail, responses((status=200,description="The contact address is proven",body=Issuer),(status=401,description="otp_invalid",body=ErrorResponse),(status=404,body=ErrorResponse),(status=409,description="issuer_email_already_verified",body=ErrorResponse),(status=503,description="verification_unavailable",body=ErrorResponse)), security(("apiKey"=[])))]
-fn confirm_issuer_email() {}
-#[utoipa::path(put, path="/v1/issuers/{id}/payout-addresses", operation_id="setIssuerPayoutAddresses", tag="issuers", params(("id"=String, Path)), request_body=SetIssuerPayoutAddresses, responses((status=200,description="The identity with its new address set",body=Issuer),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=404,description="issuer_not_found or payout_address_not_found",body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn set_issuer_payout_addresses() {}
-#[utoipa::path(post, path="/v1/payout-addresses", operation_id="createPayoutAddress", tag="issuers", request_body=PayoutAddressRequest, responses((status=201,body=PayoutAddress),(status=400,body=ErrorResponse),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn create_payout_address() {}
-#[utoipa::path(get, path="/v1/payout-addresses", operation_id="listPayoutAddresses", tag="issuers", responses((status=200,body=PayoutAddressList),(status=401,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn list_payout_addresses() {}
-#[utoipa::path(delete, path="/v1/payout-addresses/{id}", operation_id="deletePayoutAddress", tag="issuers", params(("id"=String, Path)), responses((status=204,description="Deleted, with every association to it"),(status=401,body=ErrorResponse),(status=404,body=ErrorResponse),(status=429,body=ErrorResponse)), security(("apiKey"=[])))]
-fn delete_payout_address() {}
-
 #[derive(Deserialize, ToSchema)]
 struct WithdrawalDestinationRequest {
     /// Decimal chain id of one of the deployment's networks.
@@ -1050,9 +942,9 @@ fn authorize_withdrawal() {}
 fn cancel_withdrawal() {}
 
 #[derive(OpenApi)]
-#[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_issuer,list_issuers,get_issuer,update_issuer,delete_issuer,start_issuer_email,confirm_issuer_email,set_issuer_payout_addresses,create_payout_address,list_payout_addresses,delete_payout_address,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,get_webhook,remove_webhook,test_webhook,deliveries,issue_key,revoke_key,create_withdrawal,list_withdrawals,get_withdrawal,authorize_withdrawal,cancel_withdrawal),
- components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerVerification,EmailVerification,MerchantAuth,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,IssuerRequest,UpdateIssuerRequest,ConfirmIssuerEmail,SetIssuerPayoutAddresses,PayoutAddressRequest,PayoutAddress,PayoutAddressList,Issuer,IssuerPage,StartIssuerEmail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,StatusWithdrawals,StatusSigner,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage,CreateWithdrawal,WithdrawalDestinationRequest,WithdrawalAuthorizations,LegAuthorization,Withdrawal,WithdrawalDestination,WithdrawalLeg,WithdrawalAuthorization,WithdrawalNoncePreimage,WithdrawalPage)),
- modifiers(&Security), tags((name="withdrawals",description="Moving the Gum wallet's stablecoins to an address the merchant names: USDC across every network, USDT on the network it sits on"),(name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="issuers",description="Issuer identities and the payout addresses they settle to"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
+#[openapi(paths(create_deposit_request,list_deposit_requests,get_deposit_request,cancel_deposit_request,transfers,deposit_request_attachment,request_pdf,proof,deposit_request_verification,deposit_request_client_secret,create_customer,list_customers,get_customer,update_customer,create_attachment,finalize_attachment,account,status,add_webhook,list_webhooks,get_webhook,remove_webhook,test_webhook,deliveries,issue_key,revoke_key,create_withdrawal,list_withdrawals,get_withdrawal,authorize_withdrawal,cancel_withdrawal),
+ components(schemas(ErrorDetail,ErrorResponse,Chain,Token,AsOf,SelfSettlement,Attention,IndexerFreshness,Party,PayerVerification,EmailVerification,MerchantAuth,ClientSecret,AttachmentDescriptor,Attribution,CreateDepositRequest,DepositRequest,DepositRequestStatus,DepositRequestSummary,DepositRequestPage,Transfer,TransferList,VerificationFactStatus,VerificationRequirements,VerificationAttempt,VerificationDetail,CustomerRequest,UpdateCustomerRequest,Customer,CustomerPage,CustomerStats,CustomerDetail,AttachmentRequest,AttachmentUpload,AttachmentCommitment,CanonicalIssuanceSnapshot,ProofTransfer,VerificationAttestationPayload,SignedVerificationAttestation,ProofOfPayment,ApiKeyGeneration,IssuedApiKey,Account,StatusChain,StatusIndexer,StatusSweeper,StatusWithdrawals,StatusSigner,ServiceStatus,WebhookRequest,Webhook,WebhookList,TestDelivery,Delivery,DeliveryAttempt,DeliveryPage,CreateWithdrawal,WithdrawalDestinationRequest,WithdrawalAuthorizations,LegAuthorization,Withdrawal,WithdrawalDestination,WithdrawalLeg,WithdrawalAuthorization,WithdrawalNoncePreimage,WithdrawalPage)),
+ modifiers(&Security), tags((name="withdrawals",description="Moving the Gum wallet's stablecoins to an address the merchant names: USDC across every network, USDT on the network it sits on"),(name="deposit-requests",description="Deposit request issuance, documents, and deposit tracking"),(name="customers",description="Merchant-owned counterparty records"),(name="attachments",description="PDF upload and finalization"),(name="webhooks",description="Webhook endpoint and delivery management")))]
 struct ApiDoc;
 
 struct Security;
@@ -1075,7 +967,7 @@ impl utoipa::Modify for Security {
         api.info.version = "1.0.0".into();
         api.info.description = Some(
             "Every id is a UUID behind a prefix naming its resource: dr_ deposit request, \
-             cus_ customer, iss_ issuer identity, pa_ payout address, att_ attachment, wh_ \
+             cus_ customer, att_ attachment, wh_ \
              webhook endpoint, whd_ webhook delivery, evt_ webhook event, va_ verification \
              attempt, acct_ account. Only that canonical form is accepted back. Timestamps are \
              RFC 3339 in UTC to the second with a Z suffix; exact amounts are decimal strings."
@@ -1126,17 +1018,6 @@ mod tests {
         ("/v1/webhook-deliveries", "get"),
         ("/v1/account/api-key", "post"),
         ("/v1/account/api-key", "delete"),
-        ("/v1/issuers", "post"),
-        ("/v1/issuers", "get"),
-        ("/v1/issuers/{id}", "get"),
-        ("/v1/issuers/{id}", "patch"),
-        ("/v1/issuers/{id}", "delete"),
-        ("/v1/issuers/{id}/verify/email/start", "post"),
-        ("/v1/issuers/{id}/verify/email/confirm", "post"),
-        ("/v1/issuers/{id}/payout-addresses", "put"),
-        ("/v1/payout-addresses", "post"),
-        ("/v1/payout-addresses", "get"),
-        ("/v1/payout-addresses/{id}", "delete"),
         ("/v1/withdrawals", "post"),
         ("/v1/withdrawals", "get"),
         ("/v1/withdrawals/{id}", "get"),
@@ -1190,18 +1071,23 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        // `amount` is the only required field: `verification` defaults to
-        // none attached, the permissionless model.
-        assert!(required.contains(&"amount"), "amount must be required");
+        // `amount`, `issuer`, and `payout_address` are required inline;
+        // `verification` defaults to none attached, the permissionless
+        // model, and `issuer_id` is an optional opaque string.
+        for field in ["amount", "payout_address", "issuer"] {
+            assert!(required.contains(&field), "{field} must be required");
+        }
         assert!(
             !required.contains(&"verification"),
             "verification is optional"
         );
-        // The parties and the payout address may come from saved records.
-        for field in ["payout_address", "issuer", "payer"] {
-            assert!(!required.contains(&field), "{field} must be optional");
-            assert!(create["properties"][field].is_object(), "{field}");
-        }
+        // The payer may come from a saved customer; issuer_id is optional.
+        assert!(!required.contains(&"payer"), "payer must be optional");
+        assert!(
+            !required.contains(&"issuer_id"),
+            "issuer_id must be optional"
+        );
+        assert!(create["properties"]["issuer_id"].is_object());
         let summary = &d["components"]["schemas"]["DepositRequestSummary"]["properties"];
         for field in ["deposit_url", "updated_at", "expires_at"] {
             assert!(summary[field].is_object(), "{field}");
@@ -1227,8 +1113,6 @@ mod tests {
         // Ids are prefixed strings, never bare UUIDs, everywhere they appear.
         for (schema, field) in [
             ("Customer", "id"),
-            ("Issuer", "id"),
-            ("PayoutAddress", "id"),
             ("AttachmentDescriptor", "id"),
             ("AttachmentUpload", "id"),
             ("Webhook", "id"),

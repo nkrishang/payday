@@ -56,9 +56,10 @@ export default function ConceptsPage() {
 
       <Defs>
         <Def term="issuer">
-          The party asking. Usually saved once as an{" "}
-          <Link href="/docs/api/issuers">issuer identity</Link> with a proven contact mailbox, so
-          the payer can write back.
+          The party asking. Sent inline on every create as a <code>Party</code> — a name, an
+          optional mailbox, optional details — and stored as a snapshot on the request. An optional
+          opaque <code>issuer_id</code> of your own can ride alongside it; see{" "}
+          <Link href="/docs/api/deposit-requests/create">Create a deposit request</Link>.
         </Def>
         <Def term="payer">
           The party expected to pay. Optionally linked to a saved{" "}
@@ -80,8 +81,8 @@ export default function ConceptsPage() {
           Your wallet. By default the wallet Gum created for your account at sign-in; any EVM
           address you save works too.
         </Def>
-        <Def term="payer_policy">
-          Who may pay and what they prove first. See{" "}
+        <Def term="verification">
+          Optional add-ons naming who may pay and what they prove first. See{" "}
           <Link href="/docs/payer-verification">Verifying the payer</Link>.
         </Def>
         <Def term="expires_at">

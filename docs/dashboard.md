@@ -1,11 +1,14 @@
 # Merchant dashboard
 
 The dashboard at `gum.money/dashboard` is the browser face of the same API the
-SDK uses. It issues deposit requests, keeps customers, uploads the one PDF a
-deposit request may carry, and shows what happened to each deposit request. It adds no rules
-of its own: every limit, policy check, and status comes from the API, and the
-form only gives immediate feedback (a missing name, a file that is not a PDF)
-before the API has the final word.
+SDK uses. Gum is API-first: deposit requests, customers, attachments, and
+webhooks are created and managed through the API (see `docs/api-reference.md`
+and `docs/quickstart.md`). The dashboard creates none of them. It shows the
+account, its money, and its key: the API key the merchant's own server calls
+the API with, the balance of settled deposits and the flow that withdraws it to
+a chain of the merchant's choice, the sign-in email, and every deposit,
+read-only. It adds no rules of its own: every limit, policy check, and status
+comes from the API.
 
 ## Signing in
 
@@ -16,7 +19,7 @@ separate registration: the API provisions an account the first time it sees
 a Privy identity, so a first code creates the account and every later one
 signs into it, and the same dialog does both. Every account gets an embedded
 EVM wallet from Privy at that first sign-in; it is the merchant's own, and it
-is where their deposit requests settle unless they choose otherwise.
+is where a deposit settles when the request's `payout_address` names it.
 
 Anyone reaching a dashboard route without a live session — signed out, or
 holding tokens Privy will no longer refresh — is sent to the landing page,
@@ -28,12 +31,12 @@ keeps it, and its refresh token, in the browser and refreshes it while the
 merchant stays signed in; the dashboard reads the current token from the SDK
 and sends it on every call. Nothing of Gum's stores a credential: **no API
 key exists in the browser** — the API accepts the identity token directly on
-the deposit request, customer, attachment, and account routes, and maps it to the
-merchant account. Signing out asks Privy to end the session.
+the merchant routes, and maps it to the merchant account. Signing out asks
+Privy to end the session.
 
-Another code is offered a minute after the last one (`RESEND_COOLDOWN_MS`),
-so a merchant is not sent into Privy's rate limit or left holding two live
-codes wondering which one the page wants.
+Another code is offered a minute after the last one (`RESEND_COOLDOWN_MS`), so
+a merchant is not sent into Privy's rate limit or left holding two live codes
+wondering which one the page wants.
 
 The web app is configured with the app it signs in to as
 `NEXT_PUBLIC_PRIVY_APP_ID` (see `web/.env.example`), the same id `gum-server`
@@ -41,9 +44,9 @@ verifies sessions against. Locally that is the real development Privy app —
 there is no stand-in — so the code arrives in a real mailbox, and
 `http://127.0.0.1:3002` must be among the app's allowed domains.
 
-Dashboard pages are rendered per request as empty shells: no deposit request, customer,
-or token is in server-rendered HTML or any build artifact, and every page is
-marked `noindex`.
+Dashboard pages are rendered per request as empty shells: no deposit request,
+customer, or token is in server-rendered HTML or any build artifact, and every
+page is marked `noindex`.
 
 The dashboard calls the API from the browser with `GET`, `POST`, `PATCH`,
 `PUT`, and `DELETE`, so `gum-server` answers cross-origin requests on the
@@ -56,197 +59,83 @@ routes allow any origin.
 
 ## The dashboard page
 
-Signing in lands on `/dashboard`, which is the whole dashboard: the deposit request
-requests, the customers they are addressed to, and the flow that issues a new one.
-There are no section tabs to click through first — the only other dashboard
-pages are the detail of one record and the two long forms, and the header's
-wordmark and a back link return from them.
+Signing in lands on `/dashboard`, which is the whole dashboard, top to bottom:
+the API key, the account with its balances and the withdraw flow, and the
+deposit list. There are no section tabs to click through first — the only
+other dashboard page is the detail of one deposit.
 
-A merchant who has just signed up is not shown a description of the product;
-they are put to work on the first thing it needs from them. Nothing can be
-issued until an **issuer identity** exists, so with neither an identity nor a
-request the page *is* that setup, and issuing follows straight out of it. Once
-anything has been issued the same page carries the deposit request list, the identities,
-and the customer list in full, filters and cursors included.
-`/dashboard/deposits` and `/dashboard/customers` redirect here.
+## API key
 
-Setting up gates issuing, never looking: an account that issued through the
-API still sees what it has, and only the "New deposit request" action diverts
-into setup.
+The top of the page is the **API key** section: the key the merchant's own
+server calls the API with. It generates, rolls, and revokes the key, with one
+confirmation and no second sign-in: the session is the credential, and the API
+refuses these routes to an API key on its own. Generate shows the key exactly
+once; roll gives a replacement while the previous key keeps working for 24
+hours (`previous_key_expires_at` reports the window); revoke invalidates the
+current key and any key in its grace window at once.
 
-## Account and wallet
+## Account, balances, and withdrawals
 
-The foot of `/dashboard` is the account itself. The **Account** section shows
-the mailbox the merchant signed in with and their Gum wallet — the
-embedded EVM wallet Privy created for the account — in full, ready to copy or
-open in each network's explorer, with its balance of every stablecoin the
-network serves and its gas balance on every supported network read straight
-from the public RPCs (`NEXT_PUBLIC_CHAINS`),
-and a Sign out. The wallet is the same address on every chain, so a settled
-deposit lands there on whichever network the payer chose. A
-wallet that Privy is still creating shows as such with a *Check again*; the
-API records it as soon as a session carries it. **Withdraw**, beneath the
-balances, moves one currency to one address the merchant names. For USDC it
-moves everything the wallet holds on every network: the API snapshots the
-balances into one leg per network, the merchant signs each leg's EIP-712
-authorization with the wallet Privy holds (no gas, no delegation), and the
-relayer carries the legs to the destination while the panel tracks them;
-funds on another network cross through Circle's CCTP, which takes seconds
-from Monad and about twenty minutes from Base or Arbitrum. USDT has no 1:1
-bridge, so a USDT withdrawal is a single leg moving the destination
-network's balance; USDT held on another network is withdrawn separately to
-an address there. **Export wallet key** shows the wallet's key
-once, through Privy's own dialog, for a merchant who wants to withdraw from
-their own server (`docs/api-reference.md`, Withdrawals). The **API key**
-section below it generates, rolls, and revokes the key the merchant's own
-server uses, with one confirmation and no second sign-in: the session is the
-credential, and the API refuses these routes to an API key on its own.
+The middle of the page is the account itself. It shows the mailbox the
+merchant signed in with and their Gum wallet — the embedded EVM wallet
+Privy created for the account — in full, ready to copy or open in each
+network's explorer, with its balance of every stablecoin the network serves
+and its gas balance on every supported network read straight from the public
+RPCs (`NEXT_PUBLIC_CHAINS`), and a Sign out. The wallet is the same address on
+every chain. It shows what a deposit pays it: a request settles to the
+`payout_address`
+named when it is created, so balances and withdrawals here cover exactly the
+requests whose payout address is this wallet's address — an integration that
+pays some other address collects there, and its deposits still appear in the
+table below. A wallet that Privy is still creating shows as such with a *Check
+again*; the API records it as soon as a session carries it.
 
-## Issuer identities
+**Change**, beside the sign-in email, moves the account to a new mailbox: a
+code is sent to the new address through Privy's own flow, and the email
+changes only once the merchant enters it. Until then the old address is still
+the signed-in one, and the session, the account, and the API key are
+untouched — the email is only how the merchant gets in.
 
-An identity is the merchant's own side of a deposit request — the party it is issued
-under and the address payers write to — saved once instead of retyped. It
-answers what the composer used to ask as free text. Where a request settles
-is not part of it: that is the account's Gum wallet by default, and an
-identity may keep saved wallets as alternatives.
+**Withdraw**, beneath the balances, moves one currency to one address the
+merchant names, on a chain of their choice. For USDC it moves everything the
+wallet holds on every network: the API snapshots the balances into one leg per
+network, the merchant signs each leg's EIP-712 authorization with the wallet
+Privy holds (no gas, no delegation), and the relayer carries the legs to the
+destination while the panel tracks them; funds on another network cross
+through Circle's CCTP, which takes seconds from Monad and about twenty minutes
+from Base or Arbitrum. USDT has no 1:1 bridge, so a USDT withdrawal is a
+single leg moving the destination network's balance; USDT held on another
+network is withdrawn separately to an address there. **Export wallet key**
+shows the wallet's key once, through Privy's own dialog, for a merchant who
+wants to withdraw from their own server (`docs/api-reference.md`,
+Withdrawals).
 
-**Setting one up** takes two steps, in place on `/dashboard`: the name and
-contact address, then the code. The whole form is on the page, with one
-action in a footer that belongs to the form rather than to any section card —
-*Send code*, *Confirm code*. The footer sticks to the bottom of the viewport
-while the form runs past the fold and settles at its end, so the action is
-always to hand without ever appearing to belong to the card beside it; it
-names the section it is acting on, and finishing one scrolls the next into
-view. The contact address is **proven with an emailed code** (through Auth0,
-the same exchange payers use) before any deposit request can carry it: payers are
-told to write there, so Gum does not take a merchant's word for the mailbox
-any more than it takes a payer's. The flow resumes from whatever the account
-already holds, so an abandoned tab reopens at the step that is unfinished
-rather than the beginning. An identity counts as usable once its mailbox is
-proven.
+## Deposits
 
-**Managing them** is a section of the same page: a line per identity — the
-name, whether it can be issued under, its contact address, and whether it
-settles to the Gum wallet or has saved wallets of its own — that opens onto
-the rest. An open row *is* its form, with no Edit step, and one Save commits
-the whole row: rename it, move its contact address (which drops the proof,
-because a different mailbox is a different claim), and attach or drop saved
-wallets. Save lights up only once something differs from what is stored, takes
-the API's own answer as the new baseline when it lands, and Cancel puts it all
-back. Dropping the last saved wallet simply leaves the identity on the Gum
-wallet. A wallet is saved once per account and may serve several identities;
-an identity may keep several.
+**List** (on `/dashboard`). Its own section: heading, one line of what it
+holds, then the filters, then the table. An account with nothing issued sees
+the same table with its columns and an empty row, not a different layout. Five
+rows at a time, with Previous/Next shown only when there is another page.
+Filters for status, verification, and the customer sit above the table, and
+each is the API's own parameter, so a filter narrows the query rather than the
+page. A row carries the `issuer_id` the request was created with, the amount
+with the token's mark, and opens its detail when clicked. Every deposit shows
+its heading (or reference), the payer, the amount, the deposit request status,
+the verification add-ons, the verification state, and a paperclip when a PDF is
+attached. The status filter and the Previous/Next controls are the API's own
+`status` and `starting_after` parameters.
 
-An identity's name is unique within the account, case and surrounding space
-included, because two identities called the same thing are the same row to
-whoever reads a list or a picker. Both forms refuse a name already taken before
-the request is made, and the column refuses it regardless. Contact addresses may
-repeat — two identities can share a support mailbox.
-
-Issuance is unchanged by any of this. `POST /v1/deposit-requests` still takes the party
-and the payout address inline and snapshots them, so editing an identity never
-reaches a deposit request already issued — the same rule customers follow. What the
-identity does is stop the retyping and establish the mailbox.
-
-It also leaves a durable handle: a request records the identity's `issuer_id`
-immutably, so "these requests were issued under that identity" stays answerable
-after the identity is renamed, moved to another mailbox, or pointed at
-different wallets. An identity that requests were issued under cannot be
-deleted.
-
-The header is the landing page's, unchanged: the same wordmark at the same
-size, the same Docs and Pricing links on the same 76px rule, plus Sign out
-(which the Account section repeats).
-
-**Creating one, in the page.** The action does not navigate and does not open a
-modal: the empty state gives way to a four-step composer — the amount and
-deadline, the payer, the payer policy, then a review — and the issued link
-takes its place when the API answers. A preview sits beside the steps
-throughout, filling in as they are answered; it is the review, and each filled
-row leads back to the step that set it. The body is built by
-`buildCreateDepositRequest` in `web/components/dashboard/create-deposit-request.ts`, and the
-last screen states plainly that an issued request is immutable.
-
-There is no second, longer form. The composer asks everything
-`POST /v1/deposit-requests` takes, so nothing is a link away.
-
-The dashboard wears the landing page's palette and type in both colour schemes.
-`.dash` in `web/app/globals.css` redefines the theme tokens (`--canvas`,
-`--surface`, `--ink`, the `--color-*` Tailwind reads, and `--logo-accent`)
-rather than restyling the pages, so every page below it follows; a page that
-reads a token needs no change to sit on the dark ground.
-
-## Deposit requests
-
-**List** (on `/dashboard`). Its own section, shaped like the identities and
-customers sections beside it: heading, one line of what it holds, and the *New*
-control on the same row, then the filters, then the table. An account with
-nothing issued sees the same table with its columns and an empty row, not a
-different layout. Five rows at a time, with Previous/Next shown only when there
-is another page. Filters for status, verification, and the customer sit above the table beside the *New* control, and each is the API's own
-parameter, so a filter narrows the query rather than the page. A row carries the
-issuer identity it was issued under as a badge, the amount with the token's
-mark, and opens its detail when clicked. Every deposit request shows its heading (or reference), the payer, the
-amount, the deposit request status, the payer-policy mode, the verification state, and a
-paperclip when a PDF is attached. The status filter and the Previous/Next
-controls are the API's own `status` and `starting_after` parameters.
-
-**New deposit request** (in place on `/dashboard`). The only way to issue one,
-in four steps with a running preview beside them that doubles as the review.
-The identity is chosen from what the merchant set up and preselected when
-there is one; the request settles to the account's Gum wallet unless the
-identity has saved wallets, in which case they are offered beside it with the
-Gum wallet still the default — so the common case is no clicks at all. A
-customer's own page links here with `?customer=`, which opens the composer on
-that customer.
-
-1. *Amount*: the amount, used directly (there are no line items), its
-   currency — USDC, or USDT, which also pins the request to a network that
-   serves it (Monad or Arbitrum One) — the
-   identity when there is more than one and the destination when the identity
-   offers more than one, and the deadline — 24 hours, 7 days, 30 days, or a moment picked from a date
-   and time control. A preset is sent as `expires_in`; a picked moment is sent
-   as `expires_at`, because converting it to a duration would re-anchor it to
-   whenever the request arrived. The window the API accepts — at least ten
-   minutes out, at most 366 days — is checked here too, to save a round trip.
-2. *Payer*: a customer picker that pre-fills the payer from a saved
-   customer and links the request to it (the request still stores its own
-   snapshot), the payer typed fresh otherwise — saved as a customer on
-   issue — what the request is for, a reference, notes, and the attachment.
-3. *Verification*: the verification add-ons.
-4. *Review*: every value as it will be sent.
-
-The whole document, exactly as `POST /v1/deposit-requests` takes it:
-
-- the amount and its `currency`, with `chain_id` when the currency is USDT;
-- issuer and payer parties (name, optional email, optional free-text
-  details, rendered verbatim on the deposit request);
-- heading, reference, and notes;
-- one PDF attachment, up to 5 MiB. The file goes straight to object storage
-  with the API's presigned headers, then the dashboard polls finalization and
-  shows the attachment's own stages: *uploading*, *scanning* (the malware scan
-  has not reported), then *ready* with its size and SHA-256 — or *rejected*
-  with the API's reason;
-- the verification add-ons. The dashboard composes only the email check:
-  the expected email is required when the add-on is on, says so on its
-  label, and arrives pre-filled from the payer's address — following it
-  until the merchant types their own, after which it is theirs. Merchant
-  auth is not offered here: it needs an application that has signed the
-  payer in and can hand them the client secret, so it is created through
-  the API; wallet attestation is likewise API-only. Requests issued that
-  way still appear in the dashboard, with the app's payer reference, the
-  add-ons they carry, and an "Opened by your app" entry in the
-  verification activity.
-
-Issued deposit requests are immutable; a different amount, party,
-verification, or attachment means a new deposit request.
+The list is read-only: there is no action on it, and no composer. Issuing a
+deposit request is the API's job — see `docs/quickstart.md` — and requests
+issued that way appear here like any other.
 
 **Detail** (in the row itself). A row opens in place rather than navigating:
-the list is where a merchant works, and leaving it to read one request meant
-re-filtering and re-paging to come back. One row is open at a time — the detail
-is tall enough that two would make the table hard to read — and a request is
-only fetched once its row has been opened. `/dashboard/deposits/{id}` redirects
-here, so links already sent still land somewhere useful.
+the list is where a merchant looks, and leaving it to read one request meant
+re-filtering and re-paging to come back. One row is open at a time — the
+detail is tall enough that two would make the table hard to read — and a
+request is only fetched once its row has been opened. `/dashboard/deposits/{id}`
+renders the same read-only detail as its own page, so links already sent still
+land somewhere useful.
 
 The open row leads with the two questions a list cannot answer, drawn rather
 than written: a bar for how much of the amount has arrived, and a three-point
@@ -256,11 +145,12 @@ the summary row already shows is repeated. Under that, grouped by what a
 merchant came for:
 
 - *Document*: only what the row omits — the payer's address and details,
-  the notes, and a link to the saved customer;
+  the notes, a link to the saved customer, and the `issuer_id` the request
+  carries;
 - *Verification* (gated requests only): the add-ons with the merchant's own
   assertion (the expected email), and the verification verdict — separate from
-  the deposit request status, because a gated request can be funded before its payer
-  has verified. The activity behind it follows once there is any: every
+  the deposit request status, because a gated request can be funded before its
+  payer has verified. The activity behind it follows once there is any: every
   attempt the payer made, with its status (code sent, approved, or abandoned)
   and time. The payer's session and the code itself are never shown, because
   the API never sends them;
@@ -268,8 +158,8 @@ merchant came for:
   (the networks offered until the payer chooses, then the chosen one), the
   funded time, the settlement transaction, and any operator attention message.
   Addresses and the settlement hash are shown in full and link to the chosen
-  chain's explorer (`explorerUrl` in `NEXT_PUBLIC_CHAINS`) — the whole address is
-  what a merchant compares against a wallet, so a column too narrow for it
+  chain's explorer (`explorerUrl` in `NEXT_PUBLIC_CHAINS`) — the whole address
+  is what a merchant compares against a wallet, so a column too narrow for it
   breaks the line rather than hiding characters. A deployment without an
   explorer, such as a local chain, renders them as plain text rather than as
   links to a page that does not exist;
@@ -280,11 +170,22 @@ merchant came for:
   shareable link sits with it, ready to copy. It is a preview, not the
   checkout: no pay button, because the merchant is not the one paying;
 - *Files*: the attached PDF through a short-lived signed URL fetched on demand,
-  the deterministic deposit request PDF (`GET /v1/deposit-requests/{id}/request.pdf`), and the
-  Proof of Payment as JSON (`GET /v1/deposit-requests/{id}/proof`), which becomes
-  available once the request settles and verifies offline
+  the deterministic deposit request PDF (`GET /v1/deposit-requests/{id}/request.pdf`),
+  and the Proof of Payment as JSON (`GET /v1/deposit-requests/{id}/proof`),
+  which becomes available once the request settles and verifies offline
   (`gum_core::verify_proof`).
 
+Issued deposit requests are immutable; a different amount, party, verification, or
+attachment means a new deposit request.
+
+The dashboard wears the landing page's palette and type in both colour
+schemes. `.dash` in `web/app/globals.css` redefines the theme tokens
+(`--canvas`, `--surface`, `--ink`, the `--color-*` Tailwind reads, and
+`--logo-accent`) rather than restyling the pages, so every page below it
+follows; a page that reads a token needs no change to sit on the dark ground.
+The header is the landing page's, unchanged: the same wordmark at the same
+size, the same Docs and Pricing links on the same 76px rule, plus Sign out
+(which the Account section repeats).
 
 ## Verification and recovery indicators
 
@@ -315,11 +216,3 @@ a returned one, and every transfer the indexer classified as late, each with
 its transaction hash and whether it has been collected. Recovery is on-chain
 and automatic; the return to the payer is a manual review process and is not
 shown here.
-
-## Customers
-
-A customer is a reusable counterparty record: name, optional email, optional
-details. The list, below the deposit requests on `/dashboard`, pages through
-`GET /v1/customers`; a customer's page edits it
-(`PATCH`, a full replacement of the editable fields) and links to a new deposit request
-pre-filled from it. Editing a customer never changes a deposit request already issued.

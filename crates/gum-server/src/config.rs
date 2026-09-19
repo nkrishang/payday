@@ -20,17 +20,10 @@ pub struct Config {
     /// generation deployed on each (`GUM_CHAINS`).
     networks: ChainRegistry,
     /// One RPC URL per registered chain (`GUM_RPC_URL_<chain_id>`), read
-    /// at startup to verify the deployment and to pay the onboarding demo.
+    /// at startup to verify the deployment.
     rpc_urls: HashMap<u64, String>,
-    /// The chain the onboarding walkthrough's demo transfer is paid on.
-    onboarding_chain_id: u64,
     attachments: AttachmentConfig,
     attestation: AttestationSignerConfig,
-    /// The wallet that pays the onboarding walkthrough's one self-issued
-    /// deposit request; `None` leaves that endpoint unavailable. Unlike
-    /// `attestation`, this stays optional — production may legitimately
-    /// never fund this feature.
-    onboarding_payer: Option<OnboardingPayerSignerConfig>,
     /// The payer audience and the payer-reference key; both `None` leaves
     /// the email verification routes unavailable.
     payer_verification: Option<PayerVerificationConfig>,
@@ -126,11 +119,6 @@ impl Config {
             .iter()
             .map(|chain| (chain.chain_id, required(&chain.rpc_url_var())))
             .collect();
-        let onboarding_chain_id = onboarding_chain(
-            &networks,
-            std::env::var("GUM_ONBOARDING_CHAIN_ID").ok().as_deref(),
-        )
-        .unwrap_or_else(|message| panic!("{message}"));
 
         let attachments = AttachmentConfig {
             bucket: required("GUM_ATTACHMENT_BUCKET"),
@@ -149,12 +137,6 @@ impl Config {
         let attestation = attestation_signer(
             std::env::var("GUM_ATTESTATION_SIGNER_KEY").ok(),
             std::env::var("GUM_ATTESTATION_KMS_KEY_ID").ok(),
-        )
-        .unwrap_or_else(|message| panic!("{message}"));
-
-        let onboarding_payer = onboarding_payer_signer(
-            std::env::var("GUM_ONBOARDING_PAYER_KEY").ok(),
-            std::env::var("GUM_ONBOARDING_PAYER_KMS_KEY_ID").ok(),
         )
         .unwrap_or_else(|message| panic!("{message}"));
 
@@ -189,10 +171,8 @@ impl Config {
             dev_identity,
             networks,
             rpc_urls,
-            onboarding_chain_id,
             attachments,
             attestation,
-            onboarding_payer,
             payer_verification,
             public_base_url: std::env::var("GUM_PUBLIC_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".into()),
@@ -296,10 +276,6 @@ impl Config {
             .expect("every registered chain has an RPC URL")
     }
 
-    pub fn onboarding_chain_id(&self) -> u64 {
-        self.onboarding_chain_id
-    }
-
     /// The attachment bucket.
     pub fn attachments(&self) -> &AttachmentConfig {
         &self.attachments
@@ -308,12 +284,6 @@ impl Config {
     /// The Proof of Payment attestation key.
     pub fn attestation(&self) -> &AttestationSignerConfig {
         &self.attestation
-    }
-
-    /// The onboarding demo payment's signing wallet; absent unless a
-    /// deployment has deliberately funded and configured one.
-    pub fn onboarding_payer(&self) -> Option<&OnboardingPayerSignerConfig> {
-        self.onboarding_payer.as_ref()
     }
 
     /// The payer Auth0 audience and payer-reference key; absent when email
@@ -384,25 +354,6 @@ fn recovery_address(value: &str) -> Result<Address, String> {
     Ok(address)
 }
 
-/// The chain the onboarding demo pays on: the first registered chain unless
-/// `GUM_ONBOARDING_CHAIN_ID` names another registered one.
-fn onboarding_chain(networks: &ChainRegistry, value: Option<&str>) -> Result<u64, String> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        None => Ok(networks.first().chain_id),
-        Some(value) => {
-            let chain_id: u64 = value
-                .parse()
-                .map_err(|_| format!("invalid GUM_ONBOARDING_CHAIN_ID '{value}'"))?;
-            networks
-                .get(chain_id)
-                .map(|chain| chain.chain_id)
-                .ok_or_else(|| {
-                    format!("GUM_ONBOARDING_CHAIN_ID {chain_id} is not one of GUM_CHAINS")
-                })
-        }
-    }
-}
-
 /// Exactly one attestation key source: a raw key locally, KMS in production.
 /// Both or neither is a deployment mistake, not a fallback.
 fn attestation_signer(
@@ -420,25 +371,6 @@ fn attestation_signer(
         (None, None) => Err(
             "exactly one of GUM_ATTESTATION_SIGNER_KEY or GUM_ATTESTATION_KMS_KEY_ID must be set",
         ),
-    }
-}
-
-/// At most one onboarding payer signing source, same rule as attestation —
-/// but unlike attestation, having *neither* set is the expected production
-/// default, not a deployment mistake.
-fn onboarding_payer_signer(
-    signer_key: Option<String>,
-    kms_key_id: Option<String>,
-) -> Result<Option<OnboardingPayerSignerConfig>, &'static str> {
-    let signer_key = signer_key.filter(|value| !value.trim().is_empty());
-    let kms_key_id = kms_key_id.filter(|value| !value.trim().is_empty());
-    match (signer_key, kms_key_id) {
-        (Some(key), None) => Ok(Some(OnboardingPayerSignerConfig::Local(key))),
-        (None, Some(key_id)) => Ok(Some(OnboardingPayerSignerConfig::AwsKms(key_id))),
-        (Some(_), Some(_)) => Err(
-            "GUM_ONBOARDING_PAYER_KEY and GUM_ONBOARDING_PAYER_KMS_KEY_ID are mutually exclusive",
-        ),
-        (None, None) => Ok(None),
     }
 }
 
@@ -511,42 +443,9 @@ pub enum AttestationSignerConfig {
     AwsKms(String),
 }
 
-/// Which key signs the onboarding walkthrough's one demo transfer.
-pub enum OnboardingPayerSignerConfig {
-    Local(String),
-    AwsKms(String),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn onboarding_chain_defaults_to_the_first_registered_chain() {
-        let chain = |id: u64| {
-            serde_json::json!({
-                "chain_id": id,
-                "tokens": [{"currency": "USDC", "address": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"}],
-                "factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-                "batch_sweeper": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-                "factory_code_hash": format!("0x{}", "ab".repeat(32)),
-                "batch_sweeper_code_hash": format!("0x{}", "cd".repeat(32)),
-                "start_block": 0,
-                "finality_source": "finalized",
-                "finality_confirmations": 0,
-                "block_time_ms": 300,
-                "log_range_size": 100
-            })
-        };
-        let registry =
-            ChainRegistry::parse(&serde_json::json!([chain(143), chain(8453)]).to_string())
-                .unwrap();
-        assert_eq!(onboarding_chain(&registry, None).unwrap(), 143);
-        assert_eq!(onboarding_chain(&registry, Some(" ")).unwrap(), 143);
-        assert_eq!(onboarding_chain(&registry, Some("8453")).unwrap(), 8453);
-        assert!(onboarding_chain(&registry, Some("1")).is_err());
-        assert!(onboarding_chain(&registry, Some("base")).is_err());
-    }
 
     #[test]
     fn accepts_only_supported_api_key_prefixes() {
@@ -581,24 +480,6 @@ mod tests {
         assert!(attestation_signer(None, None).is_err());
         assert!(attestation_signer(Some(" ".into()), Some("".into())).is_err());
         assert!(attestation_signer(Some("0xabc".into()), Some("arn".into())).is_err());
-    }
-
-    #[test]
-    fn onboarding_payer_signer_is_optional_but_not_ambiguous() {
-        assert!(matches!(
-            onboarding_payer_signer(Some("0xabc".into()), None),
-            Ok(Some(OnboardingPayerSignerConfig::Local(key))) if key == "0xabc"
-        ));
-        assert!(matches!(
-            onboarding_payer_signer(None, Some("arn:aws:kms:key".into())),
-            Ok(Some(OnboardingPayerSignerConfig::AwsKms(id))) if id == "arn:aws:kms:key"
-        ));
-        assert!(matches!(onboarding_payer_signer(None, None), Ok(None)));
-        assert!(matches!(
-            onboarding_payer_signer(Some(" ".into()), Some("".into())),
-            Ok(None)
-        ));
-        assert!(onboarding_payer_signer(Some("0xabc".into()), Some("arn".into())).is_err());
     }
 
     #[test]

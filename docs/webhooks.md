@@ -81,9 +81,8 @@ API's `amount`, and parse every timestamp the same way:
   "reference": "INV-1042",
   "metadata": {"po": "PO-77"},
   "customer_id": null,
-  "issuer_id": "iss_0198f80c-1111-7dc1-a369-90556a64f700",
-  "verification": {"merchant_auth": {"payer_reference": "user_123"}},
-  "payer_reference": "user_123",
+  "issuer_id": "issuer-acme-eu",
+  "verification": {"email": null, "merchant_auth": {"payer_reference": "user_123"}, "wallet_attestation": false},
   "verification_completed_at": "2026-09-01T11:58:00Z",
   "likely_unsolicited_at": null,
   "payer_wallet": null,
@@ -99,17 +98,19 @@ The `dr_` id, the decimal `amount` and `received` beside their
 `_base_units`, `currency` (`USDC` or `USDT`, the stablecoin those amounts
 are in), EIP-55 addresses, and RFC 3339 UTC timestamps to the second
 are exactly what the API returns. `verification` echoes the add-ons the
-request was issued with, except the expected email, which is never included
-(the email add-on appears as `{"email": {}}`). `address` and `wallet_bound_at`
+request was issued with, exactly as the merchant named them: the expected
+email is the mailbox the merchant themselves asserted, so it goes back in
+`verification.email.expected_email`, and
+`verification.merchant_auth.payer_reference` is your own identifier for the
+payer on a merchant-auth deposit, so a `deposit_request.deposited` or
+`deposit_request.settled` handler can credit that user's ledger directly.
+`address` and `wallet_bound_at`
 are null before `deposit_request.ready`; `payer_wallet` is set only on a
 wallet-attested request, once the attestation is accepted. `chain_id` is the
 network the payment is on, as the API's decimal string: known from issuance
 when the merchant pinned it, otherwise from `deposit_request.ready`, null
-before. `payer_reference`
-is your own identifier for the payer on a merchant-auth deposit (`null`
-otherwise), so a `deposit_request.deposited` or `deposit_request.settled`
-handler can credit that user's ledger directly. The payload never includes
-the expected email or the payer's own data. `deposit_request.needs_attention`
+before. The payload never includes the payer's own free-text data
+or an email address the payer typed. `deposit_request.needs_attention`
 adds `data.deposit_request.attention {code, message, action}`, the same
 object the API's `attention` field carries. Lifecycle payloads carry no
 recovery flag by design: a `deposit_request.settled` for an overpaid deposit

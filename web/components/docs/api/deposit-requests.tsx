@@ -81,11 +81,16 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
   },
   { name: "heading, reference, notes", type: "string | null", description: "As submitted." },
   { name: "metadata", type: "object", description: "As submitted. Merchant-only." },
-  { name: "customer_id, issuer_id", type: "id | null", description: "Linked records." },
+  { name: "customer_id", type: "cus_ id | null", description: "Linked customer record." },
   {
-    name: "payer_policy",
+    name: "issuer_id",
+    type: "string | null",
+    description: "The opaque issuer id submitted at creation, verbatim.",
+  },
+  {
+    name: "verification",
     type: "object",
-    description: "Full policy, including the assertion. Merchant-only.",
+    description: "The add-ons the request was issued with, including the assertions. Merchant-only.",
   },
   {
     name: "attachment",
@@ -95,12 +100,12 @@ export const DEPOSIT_REQUEST_FIELDS: FieldDoc[] = [
   {
     name: "client_secret, client_secret_expires_at",
     type: "string",
-    description: "merchant_session only. Present on the issuing 201; never again.",
+    description: "merchant_auth only. Present on the issuing 201; never again.",
   },
   {
     name: "verification_completed_at",
     type: "timestamp | null",
-    description: "Payer policy satisfied.",
+    description: "Identity add-ons satisfied.",
   },
   {
     name: "likely_unsolicited_at",
@@ -191,8 +196,8 @@ const OBJECT = `{
   "notes": "Net 30. Thank you.",
   "metadata": { "po": "PO-77" },
   "customer_id": "cus_0198f80c-1111-7dc1-a369-90556a64f700",
-  "issuer_id": "iss_0198f80c-2222-7dc1-a369-90556a64f700",
-  "payer_policy": { "mode": "verified_email", "expected_email": "ap@customer.example" },
+  "issuer_id": "issuer-acme-eu",
+  "verification": { "email": { "expected_email": "ap@customer.example" }, "wallet_attestation": false },
   "attachment": null,
   "verification_completed_at": null,
   "likely_unsolicited_at": null,
@@ -256,28 +261,24 @@ const CREATE_BODY: FieldDoc[] = [
     ),
   },
   {
-    name: "payer_policy",
+    name: "verification",
     type: "object",
-    required: true,
     description: (
       <>
-        <code>{`{"mode":"permissionless"}`}</code> ·{" "}
-        <code>{`{"mode":"verified_email","expected_email"}`}</code> ·{" "}
-        <code>{`{"mode":"merchant_session","payer_reference"}`}</code>. <code>expected_email</code>{" "}
-        is trimmed and lowercased. <code>payer_reference</code>: 1–128 printable bytes, no
-        whitespace, case preserved. Assertions are rejected on other modes.
+        Up to three independent add-ons, combinable in any way; omitted or{" "}
+        <code>{`{}`}</code> means none — fully permissionless.{" "}
+        <code>{`{"email":{"expected_email"}}`}</code> ·{" "}
+        <code>{`{"merchant_auth":{"payer_reference"}}`}</code> ·{" "}
+        <code>{`{"wallet_attestation":true}`}</code>. <code>expected_email</code> is trimmed and
+        lowercased. <code>payer_reference</code>: 1–128 printable bytes, no whitespace, case
+        preserved. Immutable; participates in idempotency.
       </>
     ),
   },
   {
     name: "payout_address",
     type: "string",
-    description: (
-      <>
-        Nonzero EVM address. Required unless <code>issuer_id</code> names an identity with a saved
-        payout address, whose first address is used.
-      </>
-    ),
+    description: <>Nonzero EVM address. Required. Receives exactly amount at settlement.</>,
   },
   {
     name: "chain_id",
@@ -298,7 +299,7 @@ const CREATE_BODY: FieldDoc[] = [
     description: (
       <>
         <code>name</code> 1–255 bytes; <code>email</code> 3–254 bytes; <code>details</code> ≤4,000
-        bytes. Required unless <code>issuer_id</code> is given. Inline wins.
+        bytes. Required. Stored as a snapshot on the request.
       </>
     ),
   },
@@ -315,9 +316,9 @@ const CREATE_BODY: FieldDoc[] = [
   },
   {
     name: "issuer_id",
-    type: "iss_ id",
+    type: "string",
     description:
-      "Stored immutably on the request. Supplies issuer and payout_address when omitted.",
+      "Optional opaque issuer identifier, 1–255 bytes, stored verbatim and returned on reads. Not an internal id: no lookup happens, and list filters match it by exact string equality.",
   },
   {
     name: "customer_id",
@@ -374,19 +375,21 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       body: (
         <>
           <p>
-            Minimal body: <code>amount</code>, <code>issuer_id</code>, <code>customer_id</code>,{" "}
-            <code>payer_policy</code>. Unknown fields are rejected. Text fields reject control
+            Minimal body: <code>amount</code>, <code>payout_address</code>, <code>issuer</code>,{" "}
+            <code>payer</code>. Unknown fields are rejected — including <code>payer_policy</code>,
+            which is no longer a field; use <code>verification</code>. Text fields reject control
             characters. Every immutable field participates in idempotency, including the
             attachment&apos;s hash.
           </p>
           <p>
             <code>address</code>, <code>payer_wallet</code>, <code>recovery_address</code>,{" "}
             <code>wallet_bound_at</code>, and <code>self_settlement</code> are null until the
-            payer&apos;s wallet attestation is accepted, signalled by{" "}
+            network is fixed — by a pinned <code>chain_id</code>, the payer&apos;s network choice,
+            or an accepted wallet attestation — signalled by{" "}
             <code>deposit_request.ready</code>. Recovery is not a request field;{" "}
-            <code>recovery_address</code> is always the attested wallet. <code>chain</code> and{" "}
-            <code>token</code> are null until then too, unless <code>chain_id</code> pinned the
-            network.
+            <code>recovery_address</code> is always Gum&apos;s own recovery wallet.{" "}
+            <code>chain</code> and <code>token</code> are null until then too, unless{" "}
+            <code>chain_id</code> pinned the network.
           </p>
           <p>
             A USDT request is <code>{`"currency": "USDT"`}</code> with <code>chain_id</code>{" "}
@@ -419,7 +422,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
         { status: 400, code: "missing_idempotency_key", when: "Header absent." },
         {
           status: 404,
-          code: "customer_not_found / issuer_not_found",
+          code: "customer_not_found",
           when: "Not owned by the account.",
         },
         {
@@ -466,9 +469,9 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
     "heading": "March retainer",
     "reference": "INV-1042",
     "notes": "Net 30. Thank you.",
-    "payer_policy": { "mode": "verified_email", "expected_email": "ap@customer.example" },
+    "verification": { "email": { "expected_email": "ap@customer.example" } },
     "customer_id": "cus_0198f80c-1111-7dc1-a369-90556a64f700",
-    "issuer_id": "iss_0198f80c-2222-7dc1-a369-90556a64f700",
+    "issuer_id": "issuer-acme-eu",
     "expires_in": 3600,
     "metadata": { "po": "PO-77" }
   }'`,
@@ -481,9 +484,9 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
     heading: "March retainer",
     reference: "INV-1042",
     notes: "Net 30. Thank you.",
-    payer_policy: { mode: "verified_email", expected_email: "ap@customer.example" },
+    verification: { email: { expected_email: "ap@customer.example" } },
     customer_id: "cus_0198f80c-1111-7dc1-a369-90556a64f700",
-    issuer_id: "iss_0198f80c-2222-7dc1-a369-90556a64f700",
+    issuer_id: "issuer-acme-eu",
     expires_in: 3600,
     metadata: { po: "PO-77" },
   },
@@ -504,7 +507,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
         { name: "status", type: "enum", description: "One public status." },
         { name: "reference", type: "string", description: "Exact match." },
         { name: "customer_id", type: "cus_ id", description: "" },
-        { name: "issuer_id", type: "iss_ id", description: "" },
+        { name: "issuer_id", type: "string", description: "Exact match." },
         {
           name: "verification",
           type: "enum",
@@ -524,7 +527,7 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
             <code>{`{ deposit_requests: DepositRequestSummary[], next_cursor: dr_ id | null }`}</code>
             . Summary fields: <code>id</code>, <code>deposit_url</code>, <code>heading</code>,{" "}
             <code>payer_name</code>, <code>reference</code>, <code>metadata</code>,{" "}
-            <code>payer_policy_mode</code>, <code>customer_id</code>, <code>issuer_id</code>,{" "}
+            <code>verification</code>, <code>customer_id</code>, <code>issuer_id</code>,{" "}
             <code>has_attachment</code>, <code>verification_completed_at</code>,{" "}
             <code>likely_unsolicited_at</code>, <code>status</code>, <code>amount</code>,{" "}
             <code>received</code>, <code>currency</code>, <code>cancellation_requested_at</code>,{" "}
@@ -545,9 +548,9 @@ export const DEPOSIT_REQUESTS: EndpointGroup = {
       "payer_name": "Customer Inc",
       "reference": "INV-1042",
       "metadata": { "po": "PO-77" },
-      "payer_policy_mode": "verified_email",
+      "verification": { "email": { "expected_email": "ap@customer.example" }, "wallet_attestation": false },
       "customer_id": "cus_0198f80c-1111-7dc1-a369-90556a64f700",
-      "issuer_id": "iss_0198f80c-2222-7dc1-a369-90556a64f700",
+      "issuer_id": "issuer-acme-eu",
       "has_attachment": false,
       "verification_completed_at": null,
       "likely_unsolicited_at": null,
@@ -720,7 +723,7 @@ const latest = await gum.depositRequests.get(id, { waitForChange: true, timeout:
       pathParams: [{ name: "id", type: "dr_ id", required: true, description: "" }],
       response: {
         fields: [
-          { name: "payer_policy_mode", type: "enum", description: "" },
+          { name: "verification", type: "object", description: "The add-ons attached at issuance, as the create input normalized them." },
           { name: "verification_completed_at", type: "timestamp | null", description: "" },
           { name: "likely_unsolicited_at", type: "timestamp | null", description: "" },
           {
@@ -740,7 +743,7 @@ const latest = await gum.depositRequests.get(id, { waitForChange: true, timeout:
   -H "Authorization: Bearer $GUM_API_KEY"`,
         ts: `const detail = await gum.depositRequests.verification(id);`,
         response: `{
-  "payer_policy_mode": "verified_email",
+  "verification": { "email": { "expected_email": "ap@customer.example" }, "wallet_attestation": false },
   "verification_completed_at": "2026-09-06T12:05:00Z",
   "likely_unsolicited_at": null,
   "facts": { "email": "approved", "merchant_session": "not_required", "wallet": "approved", "complete": true },

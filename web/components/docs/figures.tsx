@@ -282,7 +282,7 @@ function Skeleton({ width }: { width: number }) {
   );
 }
 
-/** What the payer page discloses, by policy and moment. */
+/** What the payer page discloses, by verification state and moment. */
 export function DisclosureTable() {
   const columns = ["Always", "After verification", "After the wallet step"];
   const rows: Array<[string, boolean, boolean, boolean]> = [
@@ -326,7 +326,7 @@ export function DisclosureTable() {
   );
 }
 
-/** Never shown to a payer, whatever the policy. */
+/** Never shown to a payer, whatever the add-ons. */
 export function NeverShown() {
   const items = [
     "Your payout address",

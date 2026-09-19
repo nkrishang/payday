@@ -98,9 +98,8 @@ pub struct DbInvoice {
     /// Optional link to the merchant's customer record; the parties below are
     /// the snapshot taken at issuance.
     pub customer_id: Option<Uuid>,
-    /// Optional link to the issuer identity this was issued under. Immutable,
-    /// so it still names the identity after a rename.
-    pub issuer_id: Option<Uuid>,
+    /// The merchant-supplied opaque issuer id, stored and returned verbatim.
+    pub issuer_id: Option<String>,
     pub issuer: Option<sqlx::types::Json<Party>>,
     pub bill_to: Option<sqlx::types::Json<Party>>,
     pub notes: Option<String>,
@@ -381,7 +380,7 @@ pub struct CreateInvoiceInput {
     pub account_id: AccountId,
     pub idempotency_key: String,
     pub customer_id: Option<Uuid>,
-    pub issuer_id: Option<Uuid>,
+    pub issuer_id: Option<String>,
     pub issuer: Party,
     pub bill_to: Party,
     pub notes: Option<String>,
@@ -437,7 +436,7 @@ pub struct IssuanceRequest<'a> {
     pub reference: Option<&'a str>,
     pub metadata: &'a serde_json::Value,
     pub customer_id: Option<Uuid>,
-    pub issuer_id: Option<Uuid>,
+    pub issuer_id: Option<String>,
     pub payer_verification: &'a PayerVerification,
     pub attachment_id: Option<Uuid>,
     pub attachment: Option<&'a gum_core::AttachmentCommitment>,
@@ -565,7 +564,7 @@ impl CreateInvoiceInput {
                 reference: self.reference.as_deref(),
                 metadata: &self.metadata,
                 customer_id: self.customer_id,
-                issuer_id: self.issuer_id,
+                issuer_id: self.issuer_id.clone(),
                 payer_verification: &self.payer_verification,
                 attachment_id,
                 attachment: existing_attachment
@@ -658,7 +657,7 @@ impl InvoiceRepository {
         .bind(input.account_id.0)
         .bind(&input.idempotency_key)
         .bind(input.customer_id)
-        .bind(input.issuer_id)
+        .bind(input.issuer_id.clone())
         .bind(sqlx::types::Json(&input.issuer))
         .bind(sqlx::types::Json(&input.bill_to))
         .bind(&input.notes)
@@ -948,7 +947,9 @@ impl InvoiceRepository {
         status: Option<&str>,
         reference: Option<&str>,
         customer_id: Option<Uuid>,
-        issuer_id: Option<Uuid>,
+        // The merchant-supplied opaque issuer id, compared as exact,
+        // account-scoped text equality against the stored value.
+        issuer_id: Option<&str>,
         // `not_required`, `pending`, `verified`, or `likely_unsolicited`:
         // verification is a separate fact from the payment's status, so it is
         // a separate filter.
@@ -971,7 +972,7 @@ impl InvoiceRepository {
                  AND ($3::text IS NULL OR candidate.reference = $3)
                  AND ($4 IS NULL OR (candidate.created_at, candidate.id) < (cursor.created_at, cursor.id))
                  AND ($6::uuid IS NULL OR candidate.customer_id = $6)
-                 AND ($7::uuid IS NULL OR candidate.issuer_id = $7)
+                 AND ($7::text IS NULL OR candidate.issuer_id = $7)
                  AND ($8::text IS NULL OR
                     ($8 = 'not_required' AND candidate.expected_email IS NULL
                         AND candidate.payer_reference IS NULL) OR

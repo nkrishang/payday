@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
-use alloy_sol_types::{SolCall, sol};
+use alloy_sol_types::sol;
 use chrono::Utc;
 use gum_bus::{BackoffPolicy, Publisher};
 use gum_chain::{
@@ -259,13 +259,7 @@ impl ChainWorker {
                 Ok(Started::Transaction) => report.started += 1,
                 Ok(Started::Resolved) => report.resolved += 1,
                 Ok(Started::Deferred) => {}
-                Ok(Started::NoSigner) => {
-                    // A dedicated onboarding lane cannot consume an ordinary
-                    // signer. Let unrelated work behind it use the pool.
-                    if !matches!(job.command, ExecutionCommand::OnboardingPayment(_)) {
-                        break;
-                    }
-                }
+                Ok(Started::NoSigner) => break,
                 Err(error) => {
                     warn!(job_id = %job.id, error = %error, "starting job failed");
                     report.errors.push(error.to_string());
@@ -446,11 +440,6 @@ impl ChainWorker {
                 .transaction_receipt(tx_hash)
                 .await?
                 .map(Receipt::Step),
-            ExecutionCommand::OnboardingPayment(_) => self
-                .chain
-                .transaction_receipt(tx_hash)
-                .await?
-                .map(Receipt::Step),
         })
     }
 
@@ -495,25 +484,6 @@ impl ChainWorker {
             (ExecutionCommand::WithdrawalStep(command), Receipt::Step(outcome)) => {
                 self.finalize_step(transaction, command, tx_hash, outcome, &boundary)
                     .await
-            }
-            (ExecutionCommand::OnboardingPayment(_), Receipt::Step(_)) => {
-                let tx_hash = transaction.attempts[0].tx_hash;
-                let event = ExecutionEvent::OnboardingPaymentSubmitted {
-                    job_id: transaction.job.id,
-                    chain_id: self.config.chain_id,
-                    tx_hash,
-                };
-                // A node may have accepted and mined the initial attempt
-                // before mark_broadcast and its event committed. Publishing
-                // the stable initial hash here closes that crash window; an
-                // event already written at broadcast deduplicates exactly.
-                let mut tx = self.pool.begin().await?;
-                self.publish(&mut tx, &transaction.job, &event).await?;
-                store::resolve_transaction(&mut tx, transaction.id, TxState::Finalized).await?;
-                store::resolve_job(&mut tx, transaction.job.id, JobState::Finalized, &event)
-                    .await?;
-                tx.commit().await?;
-                Ok(true)
             }
             _ => unreachable!("receipt kind follows the command kind"),
         }
@@ -646,14 +616,6 @@ impl ChainWorker {
                     tx_hash: attempt.tx_hash,
                     replacement: attempt.replacement_number,
                 }),
-                ExecutionCommand::OnboardingPayment(_) if attempt.replacement_number == 0 => {
-                    Some(ExecutionEvent::OnboardingPaymentSubmitted {
-                        job_id: transaction.job.id,
-                        chain_id: self.config.chain_id,
-                        tx_hash: attempt.tx_hash,
-                    })
-                }
-                ExecutionCommand::OnboardingPayment(_) => None,
                 ExecutionCommand::WithdrawalStep(_) => None,
             };
             if let Some(event) = event {
@@ -704,23 +666,6 @@ impl ChainWorker {
                     )
                     .await?
             }
-            ExecutionCommand::OnboardingPayment(command) => {
-                self.chain
-                    .prepare_call(
-                        command.payer,
-                        command.token,
-                        transferCall {
-                            to: command.recipient,
-                            amount: command.amount,
-                        }
-                        .abi_encode()
-                        .into(),
-                        transaction.nonce,
-                        transaction.gas_limit,
-                        fees,
-                    )
-                    .await?
-            }
         };
         let attempt = Attempt {
             replacement_number: previous.replacement_number + 1,
@@ -744,11 +689,6 @@ impl ChainWorker {
         reason: AbandonReason,
     ) -> Result<(), ExecutorError> {
         let event = match &transaction.job.command {
-            ExecutionCommand::OnboardingPayment(_) => {
-                // Never claim a financial failure from an uncertain nonce outcome.
-                self.report_stall(transaction).await?;
-                return Ok(());
-            }
             ExecutionCommand::SweepBatch(_) => ExecutionEvent::SweepAbandoned {
                 job_id: transaction.job.id,
                 chain_id: self.config.chain_id,
@@ -862,20 +802,9 @@ impl ChainWorker {
             }
         }
 
-        let dedicated = match &job.command {
-            ExecutionCommand::OnboardingPayment(command) => Some(command.payer),
-            _ => None,
-        };
-        let Some(signer) = dedicated.or_else(|| free.first().copied()) else {
+        let Some(signer) = free.first().copied() else {
             return Ok(Started::NoSigner);
         };
-        if dedicated.is_some()
-            && store::busy_signers(&self.pool, self.config.chain_id)
-                .await?
-                .contains(&signer)
-        {
-            return Ok(Started::NoSigner);
-        }
 
         let mined = self.chain.signer_nonce(signer, false).await?;
         let pending = self.chain.signer_nonce(signer, true).await?;
@@ -883,9 +812,6 @@ impl ChainWorker {
             // Something outside the pool is using this key. Never sign on
             // top of it; another signer may still take the job.
             warn!(%signer, mined, pending, "signer has transactions in flight that are not ours; skipping it");
-            if dedicated.is_some() {
-                return Ok(Started::NoSigner);
-            }
             free.remove(0);
             return Ok(if free.is_empty() {
                 Started::NoSigner
@@ -939,27 +865,6 @@ impl ChainWorker {
                     command.gas_limit,
                 )
             }
-            ExecutionCommand::OnboardingPayment(command) => {
-                let calldata: alloy_primitives::Bytes = transferCall {
-                    to: command.recipient,
-                    amount: command.amount,
-                }
-                .abi_encode()
-                .into();
-                let gas_limit = 100_000;
-                let prepared = self
-                    .chain
-                    .prepare_call(
-                        command.payer,
-                        command.token,
-                        calldata.clone(),
-                        mined,
-                        gas_limit,
-                        fees,
-                    )
-                    .await?;
-                (prepared, command.token, calldata, gas_limit)
-            }
         };
         let attempt = Attempt {
             replacement_number: 0,
@@ -988,9 +893,7 @@ impl ChainWorker {
             tx.commit().await?;
             id
         };
-        if dedicated.is_none() {
-            free.remove(0);
-        }
+        free.remove(0);
         info!(%signer, nonce = mined, tx_hash = %attempt.tx_hash, "transaction signed and persisted");
 
         // From here on the slot exists; a failure is recovered by the next
@@ -1040,11 +943,6 @@ impl ChainWorker {
     /// A job that will never produce a transaction.
     async fn reject_job(&self, job: &Job, reason: AbandonReason) -> Result<(), ExecutorError> {
         let event = match &job.command {
-            ExecutionCommand::OnboardingPayment(_) => ExecutionEvent::ExecutionRejected {
-                job_id: job.id,
-                chain_id: self.config.chain_id,
-                reason: format!("{reason:?}"),
-            },
             ExecutionCommand::SweepBatch(_) => ExecutionEvent::SweepAbandoned {
                 job_id: job.id,
                 chain_id: self.config.chain_id,

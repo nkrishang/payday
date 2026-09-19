@@ -118,14 +118,6 @@ prefixed_id!(
     CustomerId, "cus_", "customer"
 );
 prefixed_id!(
-    /// A saved issuer identity.
-    IssuerId, "iss_", "issuer identity"
-);
-prefixed_id!(
-    /// A saved payout wallet.
-    PayoutAddressId, "pa_", "payout address"
-);
-prefixed_id!(
     /// A PDF upload, before and after it is attached to a deposit request.
     AttachmentId, "att_", "attachment"
 );
@@ -204,8 +196,6 @@ mod tests {
         let prefixes = [
             AccountId::PREFIX,
             CustomerId::PREFIX,
-            IssuerId::PREFIX,
-            PayoutAddressId::PREFIX,
             AttachmentId::PREFIX,
             WebhookId::PREFIX,
             WebhookDeliveryId::PREFIX,

@@ -11,9 +11,9 @@ route, provisions an account the first time it sees a DID, and records the
 wallet as where the account's deposits settle by default. Gum never sees a
 password, never generates a code, and never holds the wallet's key.
 
-**Payers and issuer mailboxes are proven through Auth0.** A payer opening a
-gated deposit request, or a merchant proving an issuer identity's contact address,
-must show that a mailbox was just opened — but neither is a Gum customer,
+**Payers are proven through Auth0.** A payer opening a
+gated deposit request
+must show that a mailbox was just opened — but they are not a Gum customer,
 and those checks run many times more often than a merchant signs up. Creating
 a Privy user for each would be paying for accounts that exist for one code.
 So they stay on Auth0's embedded passwordless OTP: Auth0 creates the code,
@@ -96,7 +96,7 @@ are accepted for launch, not guarantees of the long-term authorization model.
 The passwordless Email connection's **From** address must match the sender
 configured for Resend. Monitor bounces, complaints, suppressions, and the Resend
 plan's daily sending limit. Merchant sign-in codes are Privy's, delivered by
-Privy; Resend carries only payer and issuer-mailbox codes.
+Privy; Resend carries only payer codes.
 
 ## 3. Configure Auth0 for payer verification
 
@@ -133,8 +133,7 @@ client on its own. It sets exactly five claims: method, client ID,
 authentication time, a random event ID, and the proven email, trimmed and
 lowercased so `gum-server` can compare it with the merchant's assertion.
 `gum-server` drives the exchange itself: the payer never names an email, and the
-code goes to the address the merchant asserted. The same exchange proves an
-issuer identity's contact address from the dashboard.
+code goes to the address the merchant asserted.
 
 Auth0's passwordless endpoint rate limits apply by end-user IP. Apply and
 verify the reviewable tenant controls and operational checklist in
@@ -150,7 +149,7 @@ Configure `gum-server` (or its untracked local `.env`) with:
 ```bash
 # Merchant sign-in: the Privy app's public id. Unset, only API keys authenticate.
 export GUM_PRIVY_APP_ID="<Privy app id>"
-# Payer and issuer-mailbox verification (all four together, or none).
+# Payer verification (all four together, or none).
 export GUM_PAYER_AUTH0_ISSUER="https://<tenant-domain>/"
 export GUM_PAYER_AUTH0_AUDIENCE="https://api.gum.money/payer"
 export GUM_PAYER_AUTH0_CLIENT_ID="<Gum-Payer-Verification-client-id>"
@@ -166,8 +165,8 @@ it cannot; afterwards it refreshes the set every five minutes or on an unknown
 key id, and fails closed once it has gone an hour without a successful
 refresh. Without `GUM_PRIVY_APP_ID` every dashboard session is refused and
 only API keys authenticate. Without the `GUM_PAYER_*` settings the API
-still serves gated deposit requests, but their verification routes — and issuer
-mailbox verification — answer `503 verification_unavailable`.
+still serves gated deposit requests, but their verification routes answer
+`503 verification_unavailable`.
 
 The web app is built with the same app id as `NEXT_PUBLIC_PRIVY_APP_ID`
 (`web/.env.example`).

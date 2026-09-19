@@ -393,26 +393,6 @@ resource "aws_kms_alias" "attestation" {
   target_key_id = aws_kms_key.attestation.key_id
 }
 
-# Pays the dashboard onboarding walkthrough's one self-issued deposit request
-# per account. Deliberately neither the sweep signer (whose key lives in the
-# indexer's task role, not this one) nor the attestation key (which can never
-# move funds): the demo payer is the one task-role key that broadcasts a
-# transfer, so it is funded by hand with a little gas and USDC.
-resource "aws_kms_key" "onboarding_payer" {
-  description              = "${var.name} onboarding demo payer"
-  key_usage                = "SIGN_VERIFY"
-  customer_master_key_spec = "ECC_SECG_P256K1"
-  deletion_window_in_days  = 30
-  enable_key_rotation      = false
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-resource "aws_kms_alias" "onboarding_payer" {
-  name          = "alias/${var.name}-onboarding-payer"
-  target_key_id = aws_kms_key.onboarding_payer.key_id
-}
-
 resource "aws_ecr_repository" "api" {
   name                 = "${var.name}-api"
   image_tag_mutability = "IMMUTABLE"
@@ -508,10 +488,6 @@ resource "aws_iam_role_policy" "api_attestation_kms" {
   role   = aws_iam_role.api_task.id
   policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.attestation.arn }] })
 }
-resource "aws_iam_role_policy" "api_onboarding_payer_kms" {
-  role   = aws_iam_role.api_task.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.onboarding_payer.arn }] })
-}
 # The indexer's task role has no permissions at all: it is a read-only
 # observer of chains and a client of gum-server.
 resource "aws_iam_role" "indexer_task" {
@@ -525,7 +501,7 @@ resource "aws_iam_role" "signers_task" {
 }
 resource "aws_iam_role_policy" "signers_kms" {
   role   = aws_iam_role.signers_task.id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = concat(aws_kms_key.signer[*].arn, [aws_kms_key.onboarding_payer.arn]) }] })
+  policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Action = ["kms:GetPublicKey", "kms:Sign"], Resource = aws_kms_key.signer[*].arn }] })
 }
 
 # ---------------------------------------------------------------------------
@@ -793,7 +769,6 @@ resource "aws_ecs_task_definition" "api" {
       { name = "GUM_NOTIFICATION_FROM_ADDRESS", value = var.notification_from_address },
       { name = "GUM_ATTACHMENT_BUCKET", value = aws_s3_bucket.attachments.id },
       { name = "GUM_ATTESTATION_KMS_KEY_ID", value = aws_kms_key.attestation.arn },
-      { name = "GUM_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn },
       { name = "GUM_RECOVERY_ADDRESS", value = var.recovery_address }
     ], local.payer_environment, local.payer_email_environment, local.identity_environment),
     # The API verifies the deployed contract generation on every chain at
@@ -873,7 +848,6 @@ resource "aws_ecs_task_definition" "signers" {
     stopTimeout = 120,
     environment = concat(local.common_environment, [
       { name = "GUM_KMS_KEY_IDS", value = join(",", aws_kms_key.signer[*].arn) },
-      { name = "GUM_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn },
       { name = "GUM_SIGNERS_LISTEN_ADDR", value = "0.0.0.0:${var.health_port}" }
     ]),
     secrets          = concat([{ name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url.arn }], local.rpc_url_secrets),
