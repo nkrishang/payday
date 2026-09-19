@@ -201,6 +201,15 @@ variable "chains" {
       forwarder           = string
       forwarder_code_hash = string
     }))
+    # Safe gas ceilings for the chain, in gas units, from which the sweep
+    # batch size derives: a batch may budget half of block_gas_limit, capped
+    # by transaction_gas_limit (chains whose single transactions bind below
+    # half their block). The ceilings are configured execution capacity, not
+    # protocol maxima. sweep_batch_size overrides the derivation and is
+    # validated against the budget. All absent: the historical batch of 20.
+    block_gas_limit       = optional(number)
+    transaction_gas_limit = optional(number)
+    sweep_batch_size      = optional(number)
   }))
   validation {
     condition     = length(var.chains) > 0
@@ -233,6 +242,9 @@ variable "chains" {
       && c.block_time_ms >= 1 && floor(c.block_time_ms) == c.block_time_ms
       && c.log_range_size >= 1 && c.log_range_size <= 10000 && floor(c.log_range_size) == c.log_range_size
       && (c.signer_low_balance_wei == null || (c.signer_low_balance_wei >= 0 && floor(c.signer_low_balance_wei) == c.signer_low_balance_wei))
+      && (c.block_gas_limit == null || (c.block_gas_limit > 0 && floor(c.block_gas_limit) == c.block_gas_limit))
+      && (c.transaction_gas_limit == null || (c.transaction_gas_limit > 0 && floor(c.transaction_gas_limit) == c.transaction_gas_limit))
+      && (c.sweep_batch_size == null || (c.sweep_batch_size > 0 && floor(c.sweep_batch_size) == c.sweep_batch_size))
       && (c.explorer_base_url == null || can(regex("^https://[^/?#]+/?$", c.explorer_base_url)))
       && (c.cctp == null || (
         c.cctp.domain >= 0 && floor(c.cctp.domain) == c.cctp.domain

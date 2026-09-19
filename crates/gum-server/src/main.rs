@@ -313,17 +313,16 @@ async fn main() {
         ),
         shutdown_rx.clone(),
     ));
-    tokio::spawn(
-        sweep_scheduler::SweepScheduler::new(
-            invoices.clone(),
-            publisher,
-            networks.clone(),
-            sweep_policy,
-            config.sweep_scheduler_interval(),
-            sweep_wake,
-        )
-        .run(shutdown_rx.clone()),
-    );
+    let sweep_scheduler = sweep_scheduler::SweepScheduler::new(
+        invoices.clone(),
+        publisher,
+        networks.clone(),
+        &sweep_policy,
+        config.sweep_scheduler_interval(),
+        sweep_wake,
+    )
+    .unwrap_or_else(|error| panic!("invalid sweep batch configuration: {error}"));
+    tokio::spawn(sweep_scheduler.run(shutdown_rx.clone()));
     let attestations: Arc<dyn iris::AttestationSource> = Arc::new(
         iris::IrisClient::new(config.iris_url()).unwrap_or_else(|error| panic!("{error}")),
     );

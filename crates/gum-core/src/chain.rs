@@ -93,6 +93,25 @@ pub struct ChainConfig {
     /// other currency ever has a bridge leg.
     #[serde(default)]
     pub cctp: Option<CctpConfig>,
+    /// Configured safe ceiling on this chain's block gas capacity — the
+    /// execution capacity a sweep transaction may plan against, which can
+    /// sit well below a protocol maximum or a header's advertised figure.
+    /// With `transaction_gas_limit` absent, the sweep scheduler budgets half
+    /// of this per sweep batch. Absent, a chain falls back to its explicit
+    /// `sweep_batch_size`, or the historical default of 20.
+    #[serde(default)]
+    pub block_gas_limit: Option<u64>,
+    /// Configured safe ceiling on one transaction's gas for this chain,
+    /// which can bind below half the block limit (Base and Monad both cap
+    /// single transactions under their block capacity). When present it
+    /// further constrains the sweep batch gas budget.
+    #[serde(default)]
+    pub transaction_gas_limit: Option<u64>,
+    /// Explicit deposits per sweep batch on this chain. Absent, the batch is
+    /// derived from the gas budget above; when set, it is validated against
+    /// that budget rather than silently clamped.
+    #[serde(default)]
+    pub sweep_batch_size: Option<u32>,
 }
 
 /// The largest amount a single CCTP V2 standard-transfer burn may move:
@@ -221,6 +240,23 @@ impl ChainRegistry {
                         field,
                     });
                 }
+            }
+            for (field, value) in [
+                ("block_gas_limit", chain.block_gas_limit),
+                ("transaction_gas_limit", chain.transaction_gas_limit),
+            ] {
+                if value == Some(0) {
+                    return Err(ChainRegistryError::NotPositive {
+                        chain_id: chain.chain_id,
+                        field,
+                    });
+                }
+            }
+            if chain.sweep_batch_size == Some(0) {
+                return Err(ChainRegistryError::NotPositive {
+                    chain_id: chain.chain_id,
+                    field: "sweep_batch_size",
+                });
             }
             if chain.tokens.is_empty() {
                 return Err(ChainRegistryError::NoTokens(chain.chain_id));

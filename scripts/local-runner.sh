@@ -23,6 +23,14 @@ pids=()
 postgres_started=false
 minio_started=false
 
+# The local chains emulate Monad's gas profile: a 150M block gas limit with
+# Monad's 30M single-transaction cap. The sweep batch size derives from
+# these (half the block, capped at the tx limit), so dev measures the same
+# batch economics production will see there instead of a batch the local
+# chain was resized to fit.
+ANVIL_GAS_LIMIT=150000000
+ANVIL_TRANSACTION_GAS_LIMIT=30000000
+
 cleanup() {
   status=$?
   trap - EXIT INT TERM
@@ -193,14 +201,18 @@ USDT="${GUM_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   # An idle local chain still keeps its clock moving every few seconds so
   # expiry flows do not wait five minutes.
   export GUM_INDEXER_IDLE_INTERVAL_MS="${GUM_INDEXER_IDLE_INTERVAL_MS:-2000}"
+  # The scheduler pass is also woken by the internal RPC on every finalized
+  # range; the short tick only bounds enqueue latency under load.
+  export GUM_SWEEP_SCHEDULER_INTERVAL_MS="${GUM_SWEEP_SCHEDULER_INTERVAL_MS:-500}"
   # Anvil has no request budget to trip, so the indexer paces nothing locally.
   export GUM_INDEXER_RPC_MAX_RPS="${GUM_INDEXER_RPC_MAX_RPS:-0}"
   # Anvil account #0 deploys the local fixtures (Bootstrap.s.sol) and is the
-  # first sweep signer; mnemonic accounts #10 and #11 (funded because Anvil
-  # starts with twelve accounts below) complete a three-key signer pool so
-  # several helper transactions can be in flight at once, as in production.
+  # first sweep signer; mnemonic accounts #10 through #13 (funded because
+  # Anvil starts with fourteen accounts below) complete a five-key signer
+  # pool so several helper transactions can be in flight at once, as in
+  # production.
   BOOTSTRAP_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-  export GUM_SIGNER_KEYS="${GUM_SIGNER_KEYS:-$BOOTSTRAP_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82}"
+  export GUM_SIGNER_KEYS="${GUM_SIGNER_KEYS:-$BOOTSTRAP_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82,0xa267530f49f8280200edf313ee7af6b827f2a8bce2897751d06a843f644967b1,0x47c99abed3324a2707c28affff1267e45918ec8c3f20b8aa892e8b065d2942dd}"
   # The web dev server hosts both dashboard and checkout; gum-server remains on
   # GUM_API_URL and is called cross-origin by the browser.
   export GUM_PUBLIC_BASE_URL="${GUM_PUBLIC_BASE_URL:-http://127.0.0.1:3002}"
@@ -253,10 +265,12 @@ chain_entry() {
     --arg sweeper "$BATCH_SWEEPER" --arg factory_hash "$(cast keccak "$factory_code")" \
     --arg sweeper_hash "$(cast keccak "$sweeper_code")" --arg finality "$finality_source" \
     --argjson confirmations "$confirmations" \
+    --argjson block_gas_limit "$ANVIL_GAS_LIMIT" --argjson tx_gas_limit "$ANVIL_TRANSACTION_GAS_LIMIT" \
     '{chain_id: $chain_id, tokens: $tokens, factory: $factory, batch_sweeper: $sweeper,
       factory_code_hash: $factory_hash, batch_sweeper_code_hash: $sweeper_hash,
       start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
-      block_time_ms: 1000, log_range_size: 100}'
+      block_time_ms: 1000, log_range_size: 100,
+      block_gas_limit: $block_gas_limit, transaction_gas_limit: $tx_gas_limit}'
 }
 
 # The registry both services read, built from the two bootstrapped chains.
@@ -318,8 +332,8 @@ start_minio
 prefix postgres docker logs -f "$container"
 prefix minio docker logs -f "$minio_container"
 prefix scan-stub start_scan_stub
-prefix anvil anvil --chain-id "$GUM_CHAIN_ID" --port "${GUM_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
-prefix anvil2 anvil --chain-id "$GUM_SECOND_CHAIN_ID" --port "${GUM_SECOND_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
+prefix anvil anvil --chain-id "$GUM_CHAIN_ID" --port "${GUM_RPC_URL##*:}" --accounts 14 --gas-limit "$ANVIL_GAS_LIMIT" --slots-in-an-epoch 1 --mixed-mining --block-time 1
+prefix anvil2 anvil --chain-id "$GUM_SECOND_CHAIN_ID" --port "${GUM_SECOND_RPC_URL##*:}" --accounts 14 --gas-limit "$ANVIL_GAS_LIMIT" --slots-in-an-epoch 1 --mixed-mining --block-time 1
 wait_for_anvil "$GUM_RPC_URL"
 wait_for_anvil "$GUM_SECOND_RPC_URL"
 echo "[bootstrap] deploying deterministic local fixtures on both chains"
