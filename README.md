@@ -53,6 +53,7 @@ Markdown below is the engineering record it draws on.
 - [Merchant dashboard](docs/dashboard.md)
 - [Backend architecture: services, state ownership, messaging, recovery](docs/architecture.md)
 - [Deposit indexer architecture](docs/indexer-architecture.md)
+- [Load testing and benchmarking plan](docs/load-testing-plan.md)
 - [Production deployment runbook](docs/production-runbook.md)
 - [Operational runbook index](docs/runbooks/README.md)
 - [End-to-end production smoke test](docs/runbooks/end-to-end-smoke-test.md)

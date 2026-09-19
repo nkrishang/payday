@@ -181,6 +181,10 @@ load_local_env() {
 USDT="${GUM_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   BATCH_SWEEPER="${GUM_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
   export GUM_INDEXER_POLL_INTERVAL_MS="${GUM_INDEXER_POLL_INTERVAL_MS:-1000}"
+  # Benchmarks and e2e poll the merchant API alongside their creates; the
+  # default per-account limiter would let observation starve the workload
+  # (e2e-anvil.sh raises it for the same reason).
+  export GUM_RATE_LIMIT_PER_MINUTE="${GUM_RATE_LIMIT_PER_MINUTE:-6000}"
   # The transfer signal derives ws://127.0.0.1:8545 from the RPC URL; Anvil
   # serves subscriptions on the same port and the signal falls back to the
   # standard `logs` subscription there. The timer backstop stays quick
