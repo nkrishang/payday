@@ -796,15 +796,6 @@ resource "aws_ecs_task_definition" "api" {
       { name = "GUM_ONBOARDING_PAYER_KMS_KEY_ID", value = aws_kms_key.onboarding_payer.arn },
       { name = "GUM_RECOVERY_ADDRESS", value = var.recovery_address }
     ], local.payer_environment, local.payer_email_environment, local.identity_environment),
-    # The recovery address is the custody term committed into every payment
-    # contract at deployment; a wrong or zero address would misroute every
-    # recovery, so the definition refuses to apply without one.
-    lifecycle {
-      precondition {
-        condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.recovery_address)) && lower(var.recovery_address) != "0x0000000000000000000000000000000000000000"
-        error_message = "recovery_address must be a nonzero 20-byte EVM address, derived from the recovery KMS key's public key (see infra/README.md)."
-      }
-    },
     # The API verifies the deployed contract generation on every chain at
     # startup, so it reads each chain through the same RPC secrets as the indexer.
     secrets = concat([
@@ -815,6 +806,16 @@ resource "aws_ecs_task_definition" "api" {
     ], local.rpc_url_secrets, local.payer_secrets, local.payer_email_secrets, local.identity_secrets, local.privy_secrets, local.relay_secrets),
     logConfiguration = { logDriver = "awslogs", options = { "awslogs-group" = aws_cloudwatch_log_group.api.name, "awslogs-region" = var.aws_region, "awslogs-stream-prefix" = "api" } }
   }])
+
+  # The recovery address is the custody term committed into every payment
+  # contract at deployment; a wrong or zero address would misroute every
+  # recovery, so the definition refuses to apply without one.
+  lifecycle {
+    precondition {
+      condition     = can(regex("^0x[0-9a-fA-F]{40}$", var.recovery_address)) && lower(var.recovery_address) != "0x0000000000000000000000000000000000000000"
+      error_message = "recovery_address must be a nonzero 20-byte EVM address, derived from the recovery KMS key's public key (see infra/README.md)."
+    }
+  }
 }
 
 resource "aws_ecs_task_definition" "indexer" {
