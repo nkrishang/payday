@@ -354,6 +354,8 @@ export function reduce(state: RunState, event: JournalEvent, mono: number, wall?
     case "op.timed_out": {
       const op = state.ops.get(event.payload.op);
       if (!op) return;
+      // A late timeout never overwrites observed settlement: the money moved.
+      if (op.timings.settled_api_seen || op.timings.settled_webhook_received || op.phase === "settled" || op.phase === "verified") return;
       op.phase = "timed_out";
       op.outcome = "timed_out";
       return;

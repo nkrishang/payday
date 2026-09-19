@@ -52,7 +52,9 @@ export class ApiObserver {
     // op outside the first page is never permanently invisible (a bounded
     // number of pages caps observation traffic on huge soaks).
     const pageLimit = 100;
-    const maxPages = 10;
+    // Generous page budget: a big capacity cohort must stay fully visible to
+    // observation, or the measured limit would be the harness's, not Gum's.
+    const maxPages = 50;
     let cursor: string | null = null;
     let pages = 0;
     do {

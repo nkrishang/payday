@@ -597,10 +597,12 @@ class Engine {
       guard.checkOldestUnsettled(ageSeconds);
       this.ctx.display.update();
       await sleep(config.observation.apiPollMs);
-      // Time out individual ops that will never complete.
+      // Time out individual ops that will never complete; an op that already
+      // settled is merely awaiting final verification, never a timeout.
       for (const op of outstanding) {
         const start = op.timings.create_start?.mono ?? 0;
-        if (start > 0 && performance.now() - start > timeoutSeconds * 1000 && op.phase !== "verified") {
+        const settled = op.timings.settled_api_seen !== undefined || op.timings.settled_webhook_received !== undefined;
+        if (!settled && start > 0 && performance.now() - start > timeoutSeconds * 1000 && op.phase !== "verified") {
           this.sink({ type: "op.timed_out", payload: { op: op.op } });
         }
       }
