@@ -472,6 +472,9 @@ mod tests {
                 forwarder: TEST_FORWARDER,
                 forwarder_code_hash: alloy_primitives::B256::repeat_byte(0xC3),
             }),
+            block_gas_limit: None,
+            transaction_gas_limit: None,
+            sweep_batch_size: None,
         }
     }
 

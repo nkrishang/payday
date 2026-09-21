@@ -22,11 +22,16 @@ BATCH_SWEEPER="${GUM_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c
 USDC="${GUM_USDC_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}"
 USDT="${GUM_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
 # Anvil account #0: deploys the fixtures, is the first sweep signer, and
-# sends the manual wrong-chain recovery below. Mnemonic accounts #10 and #11
-# (both Anvils start with twelve accounts) complete the signer pool, so the
-# suite runs the same several-signers-per-chain sweeper as production.
+# sends the manual wrong-chain recovery below. Mnemonic accounts #10 through
+# #13 (both Anvils start with fourteen accounts) complete the signer pool,
+# so the suite runs the same several-signers-per-chain sweeper as production.
 SIGNER_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-SIGNER_POOL="$SIGNER_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82"
+SIGNER_POOL="$SIGNER_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82,0xa267530f49f8280200edf313ee7af6b827f2a8bce2897751d06a843f644967b1,0x47c99abed3324a2707c28affff1267e45918ec8c3f20b8aa892e8b065d2942dd"
+# The local chains emulate Monad's gas profile: a 150M block gas limit with
+# Monad's 30M single-transaction cap. The sweep batch size derives from
+# these (half the block, capped at the tx limit), matching the dev runner.
+ANVIL_GAS_LIMIT="${ANVIL_GAS_LIMIT:-150000000}"
+ANVIL_TRANSACTION_GAS_LIMIT="${ANVIL_TRANSACTION_GAS_LIMIT:-30000000}"
 PAYER_KEY="0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
 PAYER="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 BENEFICIARY_EXACT="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
@@ -246,10 +251,12 @@ chain_entry() {
     --arg sweeper "$BATCH_SWEEPER" --arg factory_hash "$(cast keccak "$factory_code")" \
     --arg sweeper_hash "$(cast keccak "$sweeper_code")" --arg finality "$finality_source" \
     --argjson confirmations "$confirmations" \
+    --argjson block_gas_limit "$ANVIL_GAS_LIMIT" --argjson tx_gas_limit "$ANVIL_TRANSACTION_GAS_LIMIT" \
     '{chain_id: $chain_id, tokens: $tokens, factory: $factory, batch_sweeper: $sweeper,
       factory_code_hash: $factory_hash, batch_sweeper_code_hash: $sweeper_hash,
       start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
-      block_time_ms: 1000, log_range_size: 100}'
+      block_time_ms: 1000, log_range_size: 100,
+      block_gas_limit: $block_gas_limit, transaction_gas_limit: $tx_gas_limit}'
 }
 
 # gum-server and the indexer read GUM_CHAINS and refuse to start unless the
@@ -568,11 +575,11 @@ assert_process_alive() {
 }
 
 echo "Starting two Anvils (finalized = latest - 2, one block per second) and deploying local fixtures on both"
-anvil --chain-id "$CHAIN_ID" --port "${RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --block-time 1 --silent \
+anvil --chain-id "$CHAIN_ID" --port "${RPC_URL##*:}" --accounts 14 --gas-limit "$ANVIL_GAS_LIMIT" --slots-in-an-epoch 1 --block-time 1 --silent \
   >"$logs/anvil.log" 2>&1 &
 anvil_pid=$!
 pids+=("$anvil_pid")
-anvil --chain-id "$SECOND_CHAIN_ID" --port "${SECOND_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --block-time 1 --silent \
+anvil --chain-id "$SECOND_CHAIN_ID" --port "${SECOND_RPC_URL##*:}" --accounts 14 --gas-limit "$ANVIL_GAS_LIMIT" --slots-in-an-epoch 1 --block-time 1 --silent \
   >"$logs/anvil-second.log" 2>&1 &
 second_anvil_pid=$!
 pids+=("$second_anvil_pid")

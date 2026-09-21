@@ -6,7 +6,10 @@
 //! [`MockChain::with`] / [`MockChain::set`] and inspect it afterwards.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
 use async_trait::async_trait;
@@ -96,6 +99,10 @@ pub struct MockState {
     pub chain_id: u64,
     pub latest: u64,
     pub finalized: u64,
+    /// When set, every `broadcast_sweep_transaction` passes through this
+    /// gate: the arrival is counted and then the call waits until the test
+    /// releases permits. Cloned out of the mutex before awaiting.
+    pub broadcast_gate: Option<Arc<BroadcastGate>>,
     pub transfers: Vec<WatchedTransfer>,
     pub max_log_range: Option<u64>,
     /// Every `eth_getLogs` the worker made: the range and the recipient
@@ -167,6 +174,47 @@ pub fn mock_code_hash(address: Address) -> B256 {
 
 pub struct MockChain {
     pub state: Mutex<MockState>,
+}
+
+/// A test gate for [`MockState::broadcast_gate`]: every broadcast counts one
+/// arrival and then blocks until the test hands out permits, so a test can
+/// observe how many broadcasts are in flight at once.
+pub struct BroadcastGate {
+    permits: tokio::sync::Semaphore,
+    arrivals: AtomicUsize,
+    arrived: tokio::sync::Notify,
+}
+
+impl BroadcastGate {
+    pub fn new() -> Self {
+        Self {
+            permits: tokio::sync::Semaphore::new(0),
+            arrivals: AtomicUsize::new(0),
+            arrived: tokio::sync::Notify::new(),
+        }
+    }
+
+    async fn enter(&self) {
+        self.arrivals.fetch_add(1, Ordering::SeqCst);
+        self.arrived.notify_waiters();
+        self.permits
+            .acquire()
+            .await
+            .expect("semaphore closed")
+            .forget();
+    }
+
+    /// Waits until `n` broadcasts have arrived, holding them all in flight.
+    pub async fn wait_arrivals(&self, n: usize) {
+        while self.arrivals.load(Ordering::SeqCst) < n {
+            self.arrived.notified().await;
+        }
+    }
+
+    /// Lets `n` arrived broadcasts proceed.
+    pub fn release(&self, n: usize) {
+        self.permits.add_permits(n);
+    }
 }
 
 impl MockChain {
@@ -585,10 +633,17 @@ impl ChainExecutor for MockChain {
         &self,
         transaction: &PreparedSweepTransaction,
     ) -> Result<(), ChainError> {
-        let mut state = self.state.lock().unwrap();
-        if let Some(error) = state.submit_error.take() {
-            return Err(error());
+        let gate = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.submit_error.take() {
+                return Err(error());
+            }
+            state.broadcast_gate.clone()
+        };
+        if let Some(gate) = gate {
+            gate.enter().await;
         }
+        let mut state = self.state.lock().unwrap();
         if state
             .submissions
             .iter()

@@ -23,6 +23,14 @@ pids=()
 postgres_started=false
 minio_started=false
 
+# The local chains emulate Monad's gas profile: a 150M block gas limit with
+# Monad's 30M single-transaction cap. The sweep batch size derives from
+# these (half the block, capped at the tx limit), so dev measures the same
+# batch economics production will see there instead of a batch the local
+# chain was resized to fit.
+ANVIL_GAS_LIMIT=150000000
+ANVIL_TRANSACTION_GAS_LIMIT=30000000
+
 cleanup() {
   status=$?
   trap - EXIT INT TERM
@@ -181,6 +189,14 @@ load_local_env() {
 USDT="${GUM_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   BATCH_SWEEPER="${GUM_BATCH_SWEEPER_ADDRESS:-0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0}"
   export GUM_INDEXER_POLL_INTERVAL_MS="${GUM_INDEXER_POLL_INTERVAL_MS:-1000}"
+  # Benchmarks and e2e poll the merchant API alongside their creates; the
+  # default per-account limiter would let observation starve the workload
+  # (e2e-anvil.sh raises it for the same reason).
+  export GUM_RATE_LIMIT_PER_MINUTE="${GUM_RATE_LIMIT_PER_MINUTE:-6000}"
+  # Postgres allows 100 connections; the signers and indexer pools take a few,
+  # so the API server can hold most of the rest. The 16-connection default
+  # serializes the create storm at ~35 deposits/s and caps burst capacity.
+  export GUM_DB_MAX_CONNECTIONS="${GUM_DB_MAX_CONNECTIONS:-48}"
   # The transfer signal derives ws://127.0.0.1:8545 from the RPC URL; Anvil
   # serves subscriptions on the same port and the signal falls back to the
   # standard `logs` subscription there. The timer backstop stays quick
@@ -189,14 +205,18 @@ USDT="${GUM_USDT_ADDRESS:-0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9}"
   # An idle local chain still keeps its clock moving every few seconds so
   # expiry flows do not wait five minutes.
   export GUM_INDEXER_IDLE_INTERVAL_MS="${GUM_INDEXER_IDLE_INTERVAL_MS:-2000}"
+  # The scheduler pass is also woken by the internal RPC on every finalized
+  # range; the short tick only bounds enqueue latency under load.
+  export GUM_SWEEP_SCHEDULER_INTERVAL_MS="${GUM_SWEEP_SCHEDULER_INTERVAL_MS:-500}"
   # Anvil has no request budget to trip, so the indexer paces nothing locally.
   export GUM_INDEXER_RPC_MAX_RPS="${GUM_INDEXER_RPC_MAX_RPS:-0}"
   # Anvil account #0 deploys the local fixtures (Bootstrap.s.sol) and is the
-  # first sweep signer; mnemonic accounts #10 and #11 (funded because Anvil
-  # starts with twelve accounts below) complete a three-key signer pool so
-  # several helper transactions can be in flight at once, as in production.
+  # first sweep signer; mnemonic accounts #10 through #18 (funded because
+  # Anvil starts with nineteen accounts below) complete a ten-key signer
+  # pool so several helper transactions can be in flight at once, as in
+  # production.
   BOOTSTRAP_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-  export GUM_SIGNER_KEYS="${GUM_SIGNER_KEYS:-$BOOTSTRAP_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82}"
+  export GUM_SIGNER_KEYS="${GUM_SIGNER_KEYS:-$BOOTSTRAP_KEY,0xf214f2b2cd398c806f84e317254e0f0b801d0643303237d97a22a48e01628897,0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82,0xa267530f49f8280200edf313ee7af6b827f2a8bce2897751d06a843f644967b1,0x47c99abed3324a2707c28affff1267e45918ec8c3f20b8aa892e8b065d2942dd,0xc526ee95bf44d8fc405a158bb884d9d1238d99f0612e9f33d006bb0789009aaa,0x8166f546bab6da521a8369cab06c5d2b9e46670292d85c875ee9ec20e84ffb61,0xea6c44ac03bff858b476bba40716402b03e41b8e97e276d1baec7c37d42484a0,0x689af8efa8c651a91ad287602527f3af2fe9f6501a7ac4b061667b5a93e037fd,0xde9be858da4a475276426320d5e9262ecfc3ba460bfac56360bfa6c4c28b4ee0}"
   # The web dev server hosts both dashboard and checkout; gum-server remains on
   # GUM_API_URL and is called cross-origin by the browser.
   export GUM_PUBLIC_BASE_URL="${GUM_PUBLIC_BASE_URL:-http://127.0.0.1:3002}"
@@ -249,10 +269,12 @@ chain_entry() {
     --arg sweeper "$BATCH_SWEEPER" --arg factory_hash "$(cast keccak "$factory_code")" \
     --arg sweeper_hash "$(cast keccak "$sweeper_code")" --arg finality "$finality_source" \
     --argjson confirmations "$confirmations" \
+    --argjson block_gas_limit "$ANVIL_GAS_LIMIT" --argjson tx_gas_limit "$ANVIL_TRANSACTION_GAS_LIMIT" \
     '{chain_id: $chain_id, tokens: $tokens, factory: $factory, batch_sweeper: $sweeper,
       factory_code_hash: $factory_hash, batch_sweeper_code_hash: $sweeper_hash,
       start_block: 0, finality_source: $finality, finality_confirmations: $confirmations,
-      block_time_ms: 1000, log_range_size: 100}'
+      block_time_ms: 1000, log_range_size: 100,
+      block_gas_limit: $block_gas_limit, transaction_gas_limit: $tx_gas_limit}'
 }
 
 # The registry both services read, built from the two bootstrapped chains.
@@ -314,8 +336,8 @@ start_minio
 prefix postgres docker logs -f "$container"
 prefix minio docker logs -f "$minio_container"
 prefix scan-stub start_scan_stub
-prefix anvil anvil --chain-id "$GUM_CHAIN_ID" --port "${GUM_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
-prefix anvil2 anvil --chain-id "$GUM_SECOND_CHAIN_ID" --port "${GUM_SECOND_RPC_URL##*:}" --accounts 12 --slots-in-an-epoch 1 --mixed-mining --block-time 1
+prefix anvil anvil --chain-id "$GUM_CHAIN_ID" --port "${GUM_RPC_URL##*:}" --accounts 19 --gas-limit "$ANVIL_GAS_LIMIT" --slots-in-an-epoch 1 --mixed-mining --block-time 1
+prefix anvil2 anvil --chain-id "$GUM_SECOND_CHAIN_ID" --port "${GUM_SECOND_RPC_URL##*:}" --accounts 14 --gas-limit "$ANVIL_GAS_LIMIT" --slots-in-an-epoch 1 --mixed-mining --block-time 1
 wait_for_anvil "$GUM_RPC_URL"
 wait_for_anvil "$GUM_SECOND_RPC_URL"
 echo "[bootstrap] deploying deterministic local fixtures on both chains"
@@ -331,7 +353,12 @@ cast send "$USDC" 'transfer(address,uint256)' "$RELAY_SOLVER" 100000000 \
   --private-key "$BOOTSTRAP_KEY" --rpc-url "$GUM_RPC_URL" >/dev/null
 prefix relay-stub env RELAY_STUB_USDC="$USDC" RELAY_STUB_USDT="$USDT" RELAY_STUB_PORT="${GUM_RELAY_URL##*:}" \
   RELAY_STUB_API_KEY="$GUM_RELAY_API_KEY" node scripts/relay-stub.mjs
-prefix identity ./target/debug/gum-dev-identity
+# Binaries are built into target/<profile>; GUM_BUILD_PROFILE=release runs the
+# optimized build, which the load harness needs — the debug build cannot keep
+# up with concurrent API traffic and would benchmark the compiler, not Gum.
+GUM_BUILD_PROFILE="${GUM_BUILD_PROFILE:-debug}"
+BIN_DIR="./target/$GUM_BUILD_PROFILE"
+prefix identity "$BIN_DIR/gum-dev-identity"
 for _ in {1..100}; do
   curl -fsS "$GUM_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null 2>&1 && break
   sleep .1
@@ -343,15 +370,15 @@ curl -fsS "$GUM_DEV_IDENTITY_ISSUER/.well-known/jwks.json" >/dev/null || {
 # Migrations are an explicit step, never a side effect of a service
 # starting: every service's readiness refuses until the schema is current.
 echo "[migrate] applying schema migrations"
-./target/debug/gum-server migrate
-prefix gum-server ./target/debug/gum-server
+./"$BIN_DIR"/gum-server migrate
+prefix gum-server "$BIN_DIR/gum-server"
 for _ in {1..100}; do
   curl -fsS "$GUM_SERVER_INTERNAL_URL/health/ready" >/dev/null 2>&1 && break
   sleep .1
 done
 curl -fsS "$GUM_SERVER_INTERNAL_URL/health/ready" >/dev/null || { echo "gum-server did not become ready" >&2; exit 1; }
-prefix indexer ./target/debug/gum-indexer
-prefix signers ./target/debug/gum-signers
+prefix indexer "$BIN_DIR/gum-indexer"
+prefix signers "$BIN_DIR/gum-signers"
 echo "[runner] ready: API $GUM_API_URL; 'just web' serves the dashboard, 'just seed' mints an API key"
 echo "[runner] Ctrl-C stops services and removes the local database and attachment store"
 while :; do

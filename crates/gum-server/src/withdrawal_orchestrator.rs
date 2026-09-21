@@ -631,6 +631,9 @@ mod tests {
             signer_low_balance_wei: None,
             explorer_base_url: None,
             cctp: Some(cctp(domain)),
+            block_gas_limit: None,
+            transaction_gas_limit: None,
+            sweep_batch_size: None,
         }
     }
 

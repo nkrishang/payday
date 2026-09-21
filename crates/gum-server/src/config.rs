@@ -253,6 +253,18 @@ impl Config {
         &self.database_url
     }
 
+    /// Postgres pool ceiling for the API server. Every request that touches
+    /// the ledger queues on one of these connections, so this bounds API
+    /// throughput under concurrent load; size it against the database's own
+    /// `max_connections` minus the other services' pools.
+    pub fn db_max_connections(&self) -> u32 {
+        std::env::var("GUM_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or(16)
+    }
+
     /// The Privy app whose identity tokens are dashboard sessions; absent
     /// when the deployment accepts API keys only.
     pub fn privy(&self) -> Option<&PrivyConfig> {

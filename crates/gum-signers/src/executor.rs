@@ -29,13 +29,14 @@
 //! * resolution and event publication commit in one transaction: either
 //!   both exist or neither.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::sol;
 use chrono::Utc;
+use futures::stream::{FuturesUnordered, StreamExt};
 use gum_bus::{BackoffPolicy, Publisher};
 use gum_chain::{
     BlockHeader, ChainError, ChainExecutor, FeeEstimate, PreparedSweepTransaction, SweepReceipt,
@@ -106,6 +107,13 @@ pub struct PassReport {
 /// A fee estimate read from the node at most once per pass.
 #[derive(Default)]
 struct FeeCache(tokio::sync::OnceCell<FeeEstimate>);
+
+/// One pass's in-flight job starts: each future owns a signer's lane and
+/// hands `(job, lane, outcome)` back to the coordinator, which alone
+/// touches the report and the free/pending queues.
+type Starts<'a> = FuturesUnordered<
+    futures::future::BoxFuture<'a, (Job, Vec<Address>, Result<Started, ExecutorError>)>,
+>;
 
 impl FeeCache {
     async fn get(&self, chain: &dyn ChainExecutor) -> Result<FeeEstimate, ChainError> {
@@ -247,19 +255,86 @@ impl ChainWorker {
                     return report;
                 }
             };
-        let mut free = self.free_signers(&busy).await;
-        for job in queued {
+        let mut free: VecDeque<Address> = self.free_signers(&busy).await.into_iter().collect();
+        let mut pending: VecDeque<Job> = queued.into_iter().collect();
+
+        // Start jobs on free signers *concurrently*: each future owns one
+        // signer's lane exclusively for the pass, so the sign-persist-
+        // broadcast round-trips of one job no longer keep the other signers
+        // idle. The coordinator below is the only shared state.
+        let mut starts: Starts = FuturesUnordered::new();
+        loop {
+            // Fill every idle lane: oldest job to richest free signer.
+            while let (Some(_), Some(_)) = (pending.front(), free.front()) {
+                let job = pending.pop_front().expect("front checked");
+                let signer = free.pop_front().expect("front checked");
+                let span = info_span!(
+                    "executor.start",
+                    job_id = %job.id,
+                    correlation_id = %job.correlation_id,
+                    message_type = job.command.kind_name(),
+                );
+                let fees = &fees;
+                starts.push(Box::pin(async move {
+                    // The lane belongs to this future alone until it hands
+                    // the signer back through the coordinator.
+                    let mut lane = vec![signer];
+                    let result = self.start(&job, &mut lane, fees).instrument(span).await;
+                    (job, lane, result)
+                }));
+            }
+            let Some((job, lane, result)) = starts.next().await else {
+                break;
+            };
+            match result {
+                Ok(Started::Transaction) => report.started += 1,
+                Ok(Started::Resolved) => {
+                    report.resolved += 1;
+                    // The job concluded without a transaction; its signer
+                    // never left the lane and can take another job.
+                    for signer in lane {
+                        free.push_back(signer);
+                    }
+                }
+                Ok(Started::Deferred) => {
+                    // Deferred jobs are retried on a later pass, never
+                    // within this one.
+                    for signer in lane {
+                        free.push_back(signer);
+                    }
+                }
+                Ok(Started::NoSigner) => {
+                    // The lane's signer turned out to carry a foreign
+                    // in-flight transaction; give the job back for the next
+                    // free signer, and drop the unusable signer.
+                    pending.push_front(job);
+                }
+                Err(error) => {
+                    warn!(job_id = %job.id, error = %error, "starting job failed");
+                    report.errors.push(error.to_string());
+                    // Conservatively withhold the signer until the next
+                    // pass recomputes the busy set from durable state.
+                }
+            }
+        }
+
+        // With every lane taken, jobs that conclude without a signer still
+        // conclude this pass: withdrawal preconditions and deadlines are
+        // nonce-free conclusions.
+        for job in pending {
             let span = info_span!(
                 "executor.start",
                 job_id = %job.id,
                 correlation_id = %job.correlation_id,
                 message_type = job.command.kind_name(),
             );
-            match self.start(&job, &mut free, &fees).instrument(span).await {
-                Ok(Started::Transaction) => report.started += 1,
+            match self
+                .start(&job, &mut Vec::new(), &fees)
+                .instrument(span)
+                .await
+            {
                 Ok(Started::Resolved) => report.resolved += 1,
-                Ok(Started::Deferred) => {}
-                Ok(Started::NoSigner) => break,
+                Ok(Started::Transaction | Started::Deferred | Started::NoSigner) => {}
                 Err(error) => {
                     warn!(job_id = %job.id, error = %error, "starting job failed");
                     report.errors.push(error.to_string());

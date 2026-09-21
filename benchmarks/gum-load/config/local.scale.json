@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "mode": "local",
+  "currency": "USDC",
+  "amount": "0.01",
+  "wallets": { "count": 2000 },
+  "webhook": { "enabled": false, "listenPort": 8819 },
+  "observation": { "pollMs": 250, "apiPollMs": 500, "logRangeBlocks": 2000 },
+  "limits": {
+    "maxConcurrentFunded": 8192,
+    "maxOldestUnsettledSeconds": 900,
+    "perOpTimeoutSeconds": 600
+  }
+}

@@ -67,6 +67,9 @@ fn registry() -> Arc<ChainRegistry> {
             signer_low_balance_wei: None,
             explorer_base_url: None,
             cctp: None,
+            block_gas_limit: None,
+            transaction_gas_limit: None,
+            sweep_batch_size: None,
         }])
         .unwrap(),
     )
@@ -76,6 +79,8 @@ struct Harness {
     pool: PgPool,
     invoices: InvoiceRepository,
     scheduler: SweepScheduler,
+    /// The base policy the scheduler resolved per chain from the registry.
+    sweep_policy: SweepPolicy,
     handler: ExecutionEventHandler,
     /// The server's own consumer of `execution.events`.
     server: Consumer,
@@ -90,14 +95,16 @@ impl Harness {
         let invoices = InvoiceRepository::new(pool.clone());
         Self {
             pool: pool.clone(),
+            sweep_policy: SweepPolicy::default(),
             scheduler: SweepScheduler::new(
                 invoices.clone(),
                 SERVER,
                 registry(),
-                SweepPolicy::default(),
+                &SweepPolicy::default(),
                 Duration::from_secs(5),
                 Arc::new(Notify::new()),
-            ),
+            )
+            .unwrap(),
             handler: ExecutionEventHandler::new(
                 invoices.clone(),
                 WithdrawalRepository::new(pool.clone()),
@@ -240,7 +247,7 @@ async fn a_payment_becomes_a_command_and_the_signers_evidence_settles_it(pool: P
     assert_eq!(funded.sweep_job_id, None);
 
     // The scheduler opens exactly one job and its command is on the bus.
-    let report = h.scheduler.pass(CHAIN).await.unwrap();
+    let report = h.scheduler.pass(CHAIN, &h.sweep_policy).await.unwrap();
     assert_eq!(report.jobs.len(), 1);
     assert_eq!(report.deposit_requests, 1);
     let job_id = report.jobs[0];
@@ -261,7 +268,14 @@ async fn a_payment_becomes_a_command_and_the_signers_evidence_settles_it(pool: P
     );
 
     // While the job is open the queue is empty: no second command.
-    assert!(h.scheduler.pass(CHAIN).await.unwrap().jobs.is_empty());
+    assert!(
+        h.scheduler
+            .pass(CHAIN, &h.sweep_policy)
+            .await
+            .unwrap()
+            .jobs
+            .is_empty()
+    );
     assert!(h.commands().await.is_empty());
 
     // The signers report a submission, then the finalized receipt.
@@ -311,7 +325,14 @@ async fn a_payment_becomes_a_command_and_the_signers_evidence_settles_it(pool: P
 
     // Nothing left for anyone.
     assert!(h.consume().await.is_empty());
-    assert!(h.scheduler.pass(CHAIN).await.unwrap().jobs.is_empty());
+    assert!(
+        h.scheduler
+            .pass(CHAIN, &h.sweep_policy)
+            .await
+            .unwrap()
+            .jobs
+            .is_empty()
+    );
 }
 
 #[sqlx::test(migrator = "gum_schema::MIGRATOR")]
@@ -320,7 +341,7 @@ async fn evidence_that_does_not_fit_the_job_is_dead_lettered_not_retried(pool: P
     let invoice = h.issue("mismatch").await;
     let stranger = h.issue("stranger").await;
     h.pay(&invoice, test_payer_wallet(), AMOUNT).await;
-    let job_id = h.scheduler.pass(CHAIN).await.unwrap().jobs[0];
+    let job_id = h.scheduler.pass(CHAIN, &h.sweep_policy).await.unwrap().jobs[0];
     h.commands().await;
 
     // A receipt for the wrong request: a bug in one of the two services,
@@ -389,7 +410,7 @@ async fn abandoned_and_rejected_jobs_return_their_requests_to_the_queue(pool: Pg
     let h = Harness::new(&pool);
     let invoice = h.issue("abandon").await;
     h.pay(&invoice, test_payer_wallet(), AMOUNT).await;
-    let first = h.scheduler.pass(CHAIN).await.unwrap().jobs[0];
+    let first = h.scheduler.pass(CHAIN, &h.sweep_policy).await.unwrap().jobs[0];
     h.commands().await;
 
     // The signers gave up on the transaction (a stranger consumed the
@@ -426,7 +447,7 @@ async fn abandoned_and_rejected_jobs_return_their_requests_to_the_queue(pool: Pg
         .execute(&pool)
         .await
         .unwrap();
-    let second = h.scheduler.pass(CHAIN).await.unwrap().jobs[0];
+    let second = h.scheduler.pass(CHAIN, &h.sweep_policy).await.unwrap().jobs[0];
     assert_ne!(second, first);
     let commands = h.commands().await;
     assert_eq!(commands.len(), 1);
@@ -495,11 +516,26 @@ async fn a_halted_chain_schedules_nothing_until_it_is_resumed(pool: PgPool) {
         )
         .await
         .unwrap();
-    assert!(h.scheduler.pass(CHAIN).await.unwrap().jobs.is_empty());
+    assert!(
+        h.scheduler
+            .pass(CHAIN, &h.sweep_policy)
+            .await
+            .unwrap()
+            .jobs
+            .is_empty()
+    );
     assert!(h.commands().await.is_empty());
     assert_eq!(h.row(invoice.id).await.status, "funded");
 
     faults.clear(CHAIN, CorrelationId::new()).await.unwrap();
-    assert_eq!(h.scheduler.pass(CHAIN).await.unwrap().jobs.len(), 1);
+    assert_eq!(
+        h.scheduler
+            .pass(CHAIN, &h.sweep_policy)
+            .await
+            .unwrap()
+            .jobs
+            .len(),
+        1
+    );
     assert_eq!(h.commands().await.len(), 1);
 }

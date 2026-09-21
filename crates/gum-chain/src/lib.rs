@@ -957,6 +957,14 @@ pub fn sweep_batch_gas_limit(sweep_count: usize) -> u64 {
     )
 }
 
+/// The most batch items a transaction with `gas_budget` gas can carry: the
+/// inverse of [`sweep_batch_gas_limit`]. Used to size a chain's sweep batch
+/// from its configured gas budget (half its block limit, capped by its
+/// transaction limit).
+pub fn sweep_batch_capacity(gas_budget: u64) -> u64 {
+    gas_budget.saturating_sub(SWEEP_BATCH_BASE_GAS) / SWEEP_GAS_PER_ITEM
+}
+
 /// Sign a fully specified request with the key `wallet` holds for its
 /// `from`, returning the raw bytes and their hash without broadcasting.
 async fn sign_request(
@@ -1817,6 +1825,22 @@ mod tests {
     fn batch_gas_limit_scales_per_isolated_sweep() {
         assert_eq!(sweep_batch_gas_limit(1), 500_000);
         assert_eq!(sweep_batch_gas_limit(20), 8_100_000);
+        assert_eq!(sweep_batch_gas_limit(100), 40_100_000);
+    }
+
+    #[test]
+    fn batch_capacity_is_the_gas_limit_inverse() {
+        assert_eq!(sweep_batch_capacity(500_000), 1);
+        assert_eq!(sweep_batch_capacity(8_100_000), 20);
+        assert_eq!(sweep_batch_capacity(40_100_000), 100);
+        // Below one item's cost there is no capacity, never a panic.
+        assert_eq!(sweep_batch_capacity(0), 0);
+        assert_eq!(sweep_batch_capacity(499_999), 0);
+        // Half of Monad's 150M block, capped by its 30M transaction limit,
+        // carries 74 items.
+        assert_eq!(sweep_batch_capacity(30_000_000), 74);
+        // A 37.5M budget (half of a 75M half-block) carries 93 items.
+        assert_eq!(sweep_batch_capacity(150_000_000 / 4), 93);
     }
 
     const SWEEPER: Address = address!("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0");

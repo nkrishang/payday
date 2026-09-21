@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "mode": "real",
+  "target": "staging",
+  "api": { "url": "https://api.staging.gum.money" },
+  "currency": "USDC",
+  "amount": "0.01",
+  "payout": { "mode": "payer_wallet" },
+  "wallets": { "count": 8, "seedEnvVar": "GUM_LOAD_PAYER_SEED" },
+  "webhook": { "enabled": false, "listenPort": 8819 },
+  "observation": { "pollMs": 2000, "apiPollMs": 3000, "logRangeBlocks": 500 },
+  "checkoutOrigin": "http://127.0.0.1:3002",
+  "chains": {
+    "143": {
+      "rpcUrl": "SET VIA GUM_RPC_URL_143",
+      "finality": { "kind": "finalized", "margin": 0 },
+      "tokens": { "USDC": "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", "USDT": "0xe7cd86e13AC4309349F30B3435a9d337750fC82D" },
+      "explorerUrl": "https://monadexplorer.com"
+    },
+    "8453": {
+      "rpcUrl": "SET VIA GUM_RPC_URL_8453",
+      "finality": { "kind": "confirmations", "margin": 10 },
+      "tokens": { "USDC": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" },
+      "explorerUrl": "https://basescan.org"
+    },
+    "42161": {
+      "rpcUrl": "SET VIA GUM_RPC_URL_42161",
+      "finality": { "kind": "confirmations", "margin": 40 },
+      "tokens": { "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" },
+      "explorerUrl": "https://arbiscan.io"
+    }
+  },
+  "limits": {
+    "maxAmount": "0.01",
+    "maxGrossVolume": "1",
+    "maxOutstandingPrincipal": "1",
+    "maxConcurrentFunded": 2,
+    "maxRequests": 30,
+    "maxNativeSpend": "0.01",
+    "maxOldestUnsettledSeconds": 900,
+    "perOpTimeoutSeconds": 1800,
+    "reserveFraction": 1
+  }
+}

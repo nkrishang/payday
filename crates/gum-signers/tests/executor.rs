@@ -28,6 +28,9 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 const LATEST: u64 = 100;
+/// Upper bound for the concurrent-start test: a deadlock guard, not a
+/// timing assertion.
+const PASS_BUDGET: Duration = Duration::from_secs(10);
 
 fn config() -> ChainConfig {
     ChainConfig {
@@ -48,6 +51,9 @@ fn config() -> ChainConfig {
         signer_low_balance_wei: None,
         explorer_base_url: None,
         cctp: None,
+        block_gas_limit: None,
+        transaction_gas_limit: None,
+        sweep_batch_size: None,
     }
 }
 
@@ -653,6 +659,64 @@ async fn two_signers_run_two_transactions_on_distinct_keys(pool: PgPool) {
     assert!(
         h.chain.submissions().iter().all(|s| s.nonce == 0),
         "each key starts at its own nonce 0"
+    );
+}
+
+#[sqlx::test(migrator = "gum_schema::MIGRATOR")]
+async fn free_signers_start_their_jobs_concurrently(pool: PgPool) {
+    // Every broadcast blocks on the gate after it arrives, so the test can
+    // observe all five in flight at once. A start loop that ran one job to
+    // completion before the next would wedge on the first broadcast and
+    // trip the timeout instead.
+    let gate = Arc::new(mock::BroadcastGate::new());
+    let h = Harness::new(
+        pool,
+        MockChain::new(LATEST)
+            .with(|s| s.broadcast_gate = Some(gate.clone()))
+            .with_signers(5),
+    );
+    let jobs: Vec<_> = (1u8..=5).map(|i| sweep(vec![item(i, 10)])).collect();
+    for job in &jobs {
+        h.deliver(job).await;
+    }
+
+    let (report, ()) = futures::join!(
+        async {
+            tokio::time::timeout(PASS_BUDGET, h.worker.pass())
+                .await
+                .expect("a pass with free signers starts its jobs concurrently")
+        },
+        async {
+            gate.wait_arrivals(5).await;
+            // All five in flight, none released: five distinct lanes, every
+            // attempt signed and persisted but not yet broadcast, and a
+            // single shared fee estimate for the pass.
+            let open = h.open().await;
+            let signers: std::collections::HashSet<Address> =
+                open.iter().map(|t| t.signer).collect();
+            assert_eq!(signers.len(), 5, "five lanes in flight at once");
+            assert!(
+                open.iter()
+                    .all(|t| t.newest_attempt().broadcast_at.is_none()),
+                "no broadcast returned before its permit"
+            );
+            assert_eq!(h.chain.state.lock().unwrap().fee_requests, 1);
+            gate.release(5);
+        }
+    );
+    assert!(
+        report.errors.is_empty(),
+        "pass errored: {:?}",
+        report.errors
+    );
+    assert_eq!(report.started, 5);
+    assert_eq!(h.chain.submissions().len(), 5);
+    assert!(
+        h.open()
+            .await
+            .iter()
+            .all(|t| t.newest_attempt().broadcast_at.is_some()),
+        "every released broadcast completed"
     );
 }
 

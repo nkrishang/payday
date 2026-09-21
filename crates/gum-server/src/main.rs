@@ -70,7 +70,7 @@ async fn main() {
 
     let config = config::Config::from_env();
 
-    let pool = gum_ledger::connect(config.database_url(), 16)
+    let pool = gum_ledger::connect(config.database_url(), config.db_max_connections())
         .await
         .expect("failed to connect to database");
 
@@ -313,17 +313,16 @@ async fn main() {
         ),
         shutdown_rx.clone(),
     ));
-    tokio::spawn(
-        sweep_scheduler::SweepScheduler::new(
-            invoices.clone(),
-            publisher,
-            networks.clone(),
-            sweep_policy,
-            config.sweep_scheduler_interval(),
-            sweep_wake,
-        )
-        .run(shutdown_rx.clone()),
-    );
+    let sweep_scheduler = sweep_scheduler::SweepScheduler::new(
+        invoices.clone(),
+        publisher,
+        networks.clone(),
+        &sweep_policy,
+        config.sweep_scheduler_interval(),
+        sweep_wake,
+    )
+    .unwrap_or_else(|error| panic!("invalid sweep batch configuration: {error}"));
+    tokio::spawn(sweep_scheduler.run(shutdown_rx.clone()));
     let attestations: Arc<dyn iris::AttestationSource> = Arc::new(
         iris::IrisClient::new(config.iris_url()).unwrap_or_else(|error| panic!("{error}")),
     );

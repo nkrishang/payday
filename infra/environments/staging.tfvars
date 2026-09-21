@@ -55,7 +55,10 @@ chains = [
     finality_confirmations  = 0
     block_time_ms           = 300
     log_range_size          = 100
-    explorer_base_url       = "https://monadvision.com"
+    # Monad's gas profile: the batch derives to (30M - 100k) / 400k = 74.
+    block_gas_limit       = 150000000
+    transaction_gas_limit = 30000000
+    explorer_base_url     = "https://monadvision.com"
     cctp = {
       domain              = 15
       token_messenger     = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
@@ -77,7 +80,11 @@ chains = [
     finality_confirmations  = 10
     block_time_ms           = 2000
     log_range_size          = 10000
-    explorer_base_url       = "https://basescan.org"
+    # Base caps single transactions at 16,777,216 gas; the batch derives to
+    # (16.77M - 100k) / 400k = 41.
+    block_gas_limit       = 400000000
+    transaction_gas_limit = 16777216
+    explorer_base_url     = "https://basescan.org"
     cctp = {
       domain              = 6
       token_messenger     = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
@@ -102,7 +109,13 @@ chains = [
     finality_confirmations  = 40
     block_time_ms           = 250
     log_range_size          = 10000
-    explorer_base_url       = "https://arbiscan.io"
+    # Conservative operator ceilings for Arbitrum's effective execution
+    # capacity (its header gas limit overstates it; ArbOS 51 changed the
+    # arithmetic). Base caps single transactions at 16,777,216 gas; the
+    # batch derives to (16M - 100k) / 400k = 39.
+    block_gas_limit       = 32000000
+    transaction_gas_limit = 16777216
+    explorer_base_url     = "https://arbiscan.io"
     cctp = {
       domain              = 3
       token_messenger     = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
